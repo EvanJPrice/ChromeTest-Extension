@@ -1,12 +1,13 @@
 // background.js
-console.log("BACKGROUND.JS SCRIPT STARTED - v1.0 CS");
+console.log("BACKGROUND.JS SCRIPT STARTED");
 
 const blockedPageUrl = chrome.runtime.getURL('blocked.html');
-// --- Use YOUR Render URL BASE ---
-const backendUrlBase = 'https://chrometest.onrender.com'; 
+// --- Use YOUR Backend Render URL ---
+const backendUrlBase = 'https://ai-backend.onrender.com'; // <-- ENSURE THIS IS YOUR URL
 
 let userApiKey = null;
 
+// --- API Key Loading ---
 async function loadApiKey() {
     try {
         const items = await chrome.storage.sync.get('userApiKey');
@@ -17,15 +18,14 @@ async function loadApiKey() {
     }
 }
 
-// Load the key when the extension starts
-loadApiKey();
-
-// Listen for changes in storage
+// Listen for changes in storage (e.g., when user saves in options)
 chrome.storage.onChanged.addListener((changes, namespace) => {
-  if (namespace === 'sync' && changes.userApiKey) {
-    userApiKey = changes.userApiKey.newValue;
-    console.log("API Key updated:", userApiKey ? "Yes" : "No");
-  }
+    if (namespace === 'sync' && changes.userApiKey) {
+        userApiKey = changes.userApiKey.newValue;
+        console.log("API Key updated:", userApiKey ? "Yes" : "No");
+        // Re-run heartbeat setup now that we have a key
+        setupHeartbeat();
+    }
 });
 
 // --- Heartbeat Setup ---
@@ -37,7 +37,7 @@ async function sendHeartbeat() {
     if (userApiKey) {
         try {
             // backendUrlBase is already defined in your file
-            const heartbeatUrl = `${backendUrlBase}/heartbeat?key=${userApiKey}`;
+            const heartbeatUrl = `${backendBaseUrl}/heartbeat?key=${userApiKey}`;
 
             await fetch(heartbeatUrl, { method: 'POST' });
             console.log("Heartbeat sent.");
@@ -55,69 +55,79 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     }
 });
 
-// Create the alarm when the extension starts
+// --- NEW: Send heartbeat on BROWSER startup ---
+chrome.runtime.onStartup.addListener(() => {
+    console.log("Browser startup detected, sending heartbeat.");
+    sendHeartbeat();
+});
+
+// --- NEW: Send heartbeat on extension install/update ---
+chrome.runtime.onInstalled.addListener((details) => {
+    if (details.reason === "install" || details.reason === "update") {
+        console.log("Extension installed/updated, sending heartbeat.");
+        sendHeartbeat();
+    }
+});
+
+// --- UPDATED: Create alarm (if needed) ---
 chrome.alarms.get(HEARTBEAT_ALARM_NAME, (alarm) => {
     if (!alarm) {
         chrome.alarms.create(HEARTBEAT_ALARM_NAME, { 
             delayInMinutes: 1,  // Wait 1 minute after start
             periodInMinutes: 10 // Ping every 10 minutes
         });
-        sendHeartbeat(); // And send one immediately on startup
         console.log("Heartbeat alarm created.");
     }
 });
+
+// --- CRITICAL CHANGE: Send a heartbeat every time the service worker starts
+// This handles reloads from inactivity, updates, and initial loads.
+console.log("Service worker started, sending heartbeat.");
+sendHeartbeat();
 // --- End Heartbeat Setup ---
+
 
 // --- Listen for messages from Content Script ---
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    // Check message type, ensure we have tab info and URL data
     if (message.type === 'PAGE_DATA_RECEIVED' && sender.tab?.id && message.data?.url) {
         const tabId = sender.tab.id;
         const pageData = message.data;
-        const targetUrl = pageData.url; // URL is now part of pageData
+        const targetUrl = pageData.url; 
 
         console.log("Background: Received PAGE_DATA for:", targetUrl);
 
-        // Use the API key loaded into memory
         if (!userApiKey) {
             console.log('No API key set in storage. Stopping block check.');
-            return true; // Indicate async potential if needed, though we stop here
+            return true; // Stop here, don't block
         }
 
-        // Prevent loop if somehow the blocked page sends data
         if (targetUrl.startsWith(blockedPageUrl)) {
             console.log("Ignoring message from blocked page.");
             return true;
         }
 
-        // --- Make the call to the backend ---
-        // Use POST, send data in body
-        fetch(`${backendUrlBase}/check-url`, { // Use base URL + path
+        fetch(`${backendUrlBase}/check-url`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${userApiKey}`
             },
-            body: JSON.stringify(pageData) // Send title, desc, h1, url
+            body: JSON.stringify(pageData)
         })
         .then(response => {
-            const contentType = response.headers.get("content-type");
-            if (!response.ok || !contentType || !contentType.includes("application/json")) {
-               console.error('Backend did not return valid JSON. Status:', response.status);
-               // Block on error
-               if (tabId >= 0) { chrome.tabs.update(tabId, { url: blockedPageUrl }); }
-               throw new Error('Invalid backend response');
+            if (!response.ok) {
+               console.error('Backend returned an error. Status:', response.status);
+               throw new Error(`Server error: ${response.status}`);
             }
             return response.json();
           })
           .then(data => {
             console.log('Server decision for', targetUrl, 'is', data.decision);
             if (data.decision === 'BLOCK') {
-              // Check tab still exists before updating
               chrome.tabs.get(tabId, (tab) => {
-                  if (chrome.runtime.lastError) {
+                  if (chrome.runtime.lastError || !tab) {
                       console.warn(`Tab ${tabId} closed before block could be applied.`);
-                  } else if (tab && tab.url !== blockedPageUrl) { // Double check URL to prevent loop
+                  } else if (tab.url !== blockedPageUrl) {
                       chrome.tabs.update(tabId, { url: blockedPageUrl });
                   }
               });
@@ -125,20 +135,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           })
           .catch(error => {
             console.error('Error fetching/processing backend response:', error);
-             // Block on error
+             // Default to BLOCK on any fetch error
              chrome.tabs.get(tabId, (tab) => {
-                 if (chrome.runtime.lastError) {
+                 if (chrome.runtime.lastError || !tab) {
                       console.warn(`Tab ${tabId} closed before error block could be applied.`);
-                 } else if (tab) {
+                 } else {
                      chrome.tabs.update(tabId, { url: blockedPageUrl });
                  }
               });
           });
 
-        return true; // Indicate you will respond asynchronously
+        return true; // Indicate async response
     }
-    // Return false or undefined for messages you don't handle
     return false;
+});
+
+// --- !! STARTUP LOGIC !! ---
+// Load the key first, and THEN set up the heartbeat.
+// This fixes the race condition.
+loadApiKey().then(() => {
+    setupHeartbeat();
 });
 
 console.log("BACKGROUND.JS LISTENING FOR MESSAGES");
