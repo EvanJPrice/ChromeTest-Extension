@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Beacon Blocker Login</title>
+    <style>
+        :root {
+            --primary-blue: #2563eb;
+            --primary-red: #dc2626;
+            --bg-color: #f8fafc;
+            --text-color: #1e293b;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-color);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            color: var(--text-color);
+        }
+
+        .container {
+            background: white;
+            padding: 2.5rem;
+            border-radius: 16px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 360px;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 1.75rem;
+            margin-bottom: 0.5rem;
+            color: var(--primary-blue);
+            font-weight: 800;
+        }
+
+        p.subtitle {
+            color: #64748b;
+            margin-bottom: 2rem;
+            font-size: 0.95rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.25rem;
+            text-align: left;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        input {
+            width: 100%;
+            padding: 0.75rem;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            box-sizing: border-box;
+            font-size: 1rem;
+            transition: border-color 0.2s;
+        }
+
+        input:focus {
+            border-color: var(--primary-blue);
+            outline: none;
+        }
+
+        button {
+            width: 100%;
+            padding: 0.875rem;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background-color: var(--primary-blue);
+            color: white;
+            margin-top: 1rem;
+        }
+
+        .btn-primary:hover {
+            background-color: #1d4ed8;
+        }
+
+        .btn-google {
+            background-color: white;
+            color: #333;
+            border: 2px solid #e2e8f0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 1.5rem;
+        }
+
+        .btn-google:hover {
+            background-color: #f8fafc;
+            border-color: #cbd5e1;
+        }
+
+        .divider {
+            display: flex;
+            align-items: center;
+            text-align: center;
+            margin: 1.5rem 0;
+            color: #94a3b8;
+            font-size: 0.875rem;
+        }
+
+        .divider::before,
+        .divider::after {
+            content: '';
+            flex: 1;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .divider::before {
+            margin-right: .5em;
+        }
+
+        .divider::after {
+            margin-left: .5em;
+        }
+
+        #error {
+            color: var(--primary-red);
+            background-color: #fef2f2;
+            padding: 0.75rem;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            margin-top: 1.5rem;
+            display: none;
+            border: 1px solid #fee2e2;
+        }
+
+        /* --- Sign Up Mode Overrides --- */
+        body.signup-mode {
+            --primary-blue: var(--primary-red);
+            /* Swap blue to red globally for this mode */
+        }
+
+        body.signup-mode .btn-primary {
+            background-color: var(--primary-red);
+        }
+
+        body.signup-mode .btn-primary:hover {
+            background-color: #b91c1c;
+        }
+
+        body.signup-mode h1,
+        body.signup-mode a,
+        body.signup-mode button.link-button {
+            color: var(--primary-red);
+        }
+
+        body.signup-mode input:focus {
+            border-color: var(--primary-red);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <img src="logo.jpg" alt="Beacon Blocker Logo"
+            style="width: 80px; height: 80px; margin-bottom: 1rem; border-radius: 50%;">
+        <h1>Beacon Blocker</h1>
+        <p class="subtitle">Sign in to sync your focus rules</p>
+
+        <button id="googleLogin" class="btn-google">
+            <svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
+                <path
+                    d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"
+                    fill="#4285F4" fill-rule="evenodd" />
+                <path
+                    d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.715H.957v2.332A8.997 8.997 0 0 0 9 18z"
+                    fill="#34A853" fill-rule="evenodd" />
+                <path
+                    d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"
+                    fill="#FBBC05" fill-rule="evenodd" />
+                <path
+                    d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.272C4.672 5.14 6.656 3.58 9 3.58z"
+                    fill="#EA4335" fill-rule="evenodd" />
+            </svg>
+            Sign in with Google
+        </button>
+
+        <div class="divider">OR</div>
+
+        <form id="loginForm">
+            <div class="form-group">
+                <label for="email">Email</label>
+                <input type="email" id="email" name="email" required placeholder="name@example.com"
+                    autocomplete="username">
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <div style="position: relative;">
+                    <input type="password" id="password" name="password" required placeholder="••••••••"
+                        style="padding-right: 80px;" autocomplete="current-password" minlength="6">
+                    <button type="button" id="togglePassword"
+                        style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #64748b; cursor: pointer; font-size: 0.8rem; width: auto; padding: 5px; margin: 0;">Show</button>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0.5rem;">
+                    <button type="button" id="generatePassword"
+                        style="background: none; border: none; color: var(--primary-blue); cursor: pointer; font-size: 0.8rem; padding: 0; width: auto; display: none;">Generate
+                        Secure Password</button>
+                    <a href="#" id="forgotPassword"
+                        style="font-size: 0.8rem; color: var(--primary-blue); text-decoration: none;">Forgot
+                        Password?</a>
+                </div>
+            </div>
+            <button type="submit" class="btn-primary" id="submitBtn">Log In</button>
+            <div style="text-align: center; margin-top: 1rem; font-size: 0.9rem;">
+                <span id="toggleText">Don't have an account?</span>
+                <a href="#" id="toggleAuthMode"
+                    style="color: var(--primary-blue); font-weight: 600; text-decoration: none;">Sign Up</a>
+            </div>
+        </form>
+        <div id="error"></div>
+        <div id="success"
+            style="display: none; background-color: #f0fdf4; color: #15803d; padding: 1rem; border-radius: 8px; margin-top: 1.5rem; border: 1px solid #bbf7d0;">
+        </div>
+    </div>
+    <script src="login.js"></script>
+</body>
+
+</html>

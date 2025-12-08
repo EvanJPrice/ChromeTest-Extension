@@ -1,38 +1,204 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+
 <head>
-  <title>Blocked</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Focus Mode Active</title>
   <style>
+    :root {
+      --primary-color: #2563eb;
+      --primary-hover: #1d4ed8;
+      --bg-gradient: linear-gradient(135deg, #93c5fd 0%, #3b82f6 100%);
+      --card-bg: rgba(255, 255, 255, 0.95);
+      --text-color: #1e293b;
+      --text-secondary: #475569;
+    }
+
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background-color: #f4f4f4;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg-gradient);
       display: flex;
       justify-content: center;
       align-items: center;
-      height: 100vh;
+      min-height: 100vh;
       margin: 0;
+      color: var(--text-color);
     }
+
     .container {
       text-align: center;
-      background-color: #ffffff;
-      padding: 40px;
-      border-radius: 12px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+      background-color: var(--card-bg);
+      padding: 3rem;
+      border-radius: 24px;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+      max-width: 480px;
+      width: 90%;
+      backdrop-filter: blur(10px);
+      animation: fadeIn 0.5s ease-out;
     }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(20px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .icon {
+      position: relative;
+      width: 140px;
+      height: 140px;
+      margin: 0 auto 2rem auto;
+      border-radius: 50%;
+      background: #eff6ff;
+      /* Light blue bg */
+      border: 4px solid white;
+      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+      overflow: hidden;
+      /* Clip waves */
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .icon img {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      object-fit: cover;
+      z-index: 5;
+      /* Between waves */
+      animation: float 3s ease-in-out infinite;
+      position: relative;
+      /* margin-bottom removed to let it sit lower in the water */
+    }
+
+    /* Waves Effect - Stage Prop Style */
+    .wave {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      width: 200%;
+      /* Double width for looping */
+      height: 50px;
+      /* Increased base height */
+      background-repeat: repeat-x;
+      background-position: 0 bottom;
+      background-size: 50% 100%;
+      animation: wave-move 4s linear infinite;
+    }
+
+    /* Back Wave (Lighter, Slower) */
+    .wave.back {
+      z-index: 1;
+      bottom: 15px;
+      /* Higher up */
+      height: 60px;
+      background-image: url('data:image/svg+xml;utf8,<svg viewBox="0 0 120 28" xmlns="http://www.w3.org/2000/svg"><path d="M0 28 L0 10 Q30 0 60 10 T120 10 L120 28 Z" fill="%2393c5fd"/></svg>');
+      animation-duration: 6s;
+      opacity: 0.7;
+    }
+
+    /* Front Wave (Darker, Faster) */
+    .wave.front {
+      z-index: 10;
+      bottom: -5px;
+      height: 55px;
+      /* Taller to cover logo bottom */
+      background-image: url('data:image/svg+xml;utf8,<svg viewBox="0 0 120 28" xmlns="http://www.w3.org/2000/svg"><path d="M0 28 L0 10 Q30 0 60 10 T120 10 L120 28 Z" fill="%233b82f6"/></svg>');
+      animation-duration: 4s;
+    }
+
+    @keyframes wave-move {
+      0% {
+        transform: translateX(0);
+      }
+
+      100% {
+        transform: translateX(-50%);
+      }
+    }
+
+    @keyframes float {
+      0% {
+        transform: translateY(0px);
+      }
+
+      50% {
+        transform: translateY(-8px);
+      }
+
+      100% {
+        transform: translateY(0px);
+      }
+    }
+
     h1 {
-      font-size: 24px;
-      color: #333;
+      font-size: 2rem;
+      font-weight: 800;
+      margin: 0 0 1rem 0;
+      background: linear-gradient(to right, #2563eb, #1e40af);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
     }
+
     p {
-      font-size: 16px;
-      color: #666;
+      font-size: 1.25rem;
+      color: var(--text-secondary);
+      line-height: 1.6;
+      margin-bottom: 2rem;
+      font-weight: 500;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.75rem 1.5rem;
+      font-size: 1rem;
+      font-weight: 600;
+      color: white;
+      background-color: var(--primary-color);
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-decoration: none;
+      box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.4);
+    }
+
+    .btn:hover {
+      background-color: var(--primary-hover);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 8px -1px rgba(37, 99, 235, 0.5);
+    }
+
+    .btn:active {
+      transform: translateY(0);
     }
   </style>
 </head>
+
 <body>
   <div class="container">
-    <h1>Page Blocked</h1>
-    <p>This page was intentionally blocked by your focus agent.</p>
+    <div class="icon">
+      <div class="wave back"></div>
+      <div class="wave front"></div>
+      <img src="logo.jpg" alt="Beacon Blocker Logo">
+    </div>
+    <h1>Turn towards the tide</h1>
+    <p>Your beacon points elsewhere.</p>
+    <button id="go-back-btn" class="btn">Go Back</button>
   </div>
+
+  <script src="blocked.js"></script>
 </body>
+
 </html>
