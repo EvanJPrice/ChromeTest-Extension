@@ -1,21 +1,48 @@
-// content-script.js (v34 - Dumb Scraper)
+// content-script.js (v36 - Safe Chrome API Wrapper)
 console.log("CONTENT SCRIPT INJECTED");
 
+// --- Safe Chrome API wrapper ---
+// Prevents "Extension context invalidated" errors after extension reload
+function safeSendMessage(message) {
+    try {
+        if (chrome.runtime && chrome.runtime.id) {
+            chrome.runtime.sendMessage(message);
+        }
+    } catch (e) {
+        // Extension was reloaded, this content script is stale
+        console.log("Content Script: Extension context invalidated. Please refresh this page.");
+    }
+}
+
 let lastSentTitle = "";
+let lastSentUrl = "";
+let isUpdatePending = false; // Lock to prevent overlapping updates
 
 // Function to send the current page state to the background script
 let updateTimeout = null;
-const DEBOUNCE_DELAY_MS = 1000;
+const DEBOUNCE_DELAY_MS = 1500; // Increased from 1000 to 1500ms
 
 // Function to send the current page state to the background script
 function sendUpdate() {
+    // Don't reset the timer if an update is already scheduled
+    if (isUpdatePending) {
+        console.log("Content Script: Update already pending, ignoring trigger.");
+        return;
+    }
+
     clearTimeout(updateTimeout);
+    isUpdatePending = true;
+
     updateTimeout = setTimeout(() => {
         const currentTitle = document.title;
         const currentUrl = window.location.href;
 
-        // Basic debounce: only send an update if the title has actually changed.
-        if (currentTitle === lastSentTitle) {
+        // Reset the lock first thing
+        isUpdatePending = false;
+
+        // Basic debounce: only send an update if the title OR URL has actually changed.
+        if (currentTitle === lastSentTitle && currentUrl === lastSentUrl) {
+            console.log("Content Script: No change detected, skipping update.");
             return;
         }
 
@@ -25,6 +52,7 @@ function sendUpdate() {
         }
 
         lastSentTitle = currentTitle;
+        lastSentUrl = currentUrl;
 
         // --- Scrape Context for AI ---
         const description = document.querySelector('meta[name="description"]')?.content || "";
@@ -32,8 +60,8 @@ function sendUpdate() {
         // Get first 500 chars of body text, cleaning up whitespace
         const bodyText = document.body.innerText.replace(/\s+/g, ' ').substring(0, 500);
 
-        console.log(`Content Script: Sending update for "${currentTitle}"`);
-        chrome.runtime.sendMessage({
+        console.log(`Content Script: Sending update for "${currentTitle}" at ${currentUrl}`);
+        safeSendMessage({
             type: 'PAGE_STATE_UPDATE',
             data: {
                 url: currentUrl,
@@ -48,14 +76,16 @@ function sendUpdate() {
 
 // --- Triggers ---
 
-// 1. On initial load
-setTimeout(sendUpdate, 500);
+// 1. On initial load (slightly longer delay to ensure page is ready)
+setTimeout(sendUpdate, 800);
 
 // 2. For YouTube's SPA navigation
 document.addEventListener('yt-navigate-finish', () => {
     // After a YT navigation, the title will change, triggering the observer.
-    // We can also send an update immediately.
-    lastSentTitle = ""; // Reset lock to ensure update is sent
+    // Reset locks to ensure update is sent after navigation
+    lastSentTitle = "";
+    lastSentUrl = "";
+    isUpdatePending = false;
     sendUpdate();
 });
 
@@ -106,7 +136,7 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
     // Listen for CustomEvent from the Dashboard (App.jsx)
     window.addEventListener('BEACON_RULES_UPDATED', (event) => {
         console.log("Content Script: Received BEACON_RULES_UPDATED event. Clearing cache.");
-        chrome.runtime.sendMessage({ type: 'CLEAR_LOCAL_CACHE' });
+        safeSendMessage({ type: 'CLEAR_LOCAL_CACHE' });
     });
 
     // --- Auth Sync Bridge ---
@@ -114,7 +144,7 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
         const { token, email } = event.detail;
         console.log("Content Script: Received BEACON_AUTH_SYNC event.", email);
         if (token && email) {
-            chrome.runtime.sendMessage({
+            safeSendMessage({
                 type: 'SYNC_AUTH',
                 token: token,
                 email: email
@@ -125,7 +155,7 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
     // --- Auth Logout Bridge ---
     document.addEventListener('BEACON_AUTH_LOGOUT', () => {
         console.log("Content Script: Received BEACON_AUTH_LOGOUT event.");
-        chrome.runtime.sendMessage({ type: 'LOGOUT' });
+        safeSendMessage({ type: 'LOGOUT' });
     });
 
     // --- Theme Sync Bridge ---
@@ -134,7 +164,7 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
         console.log("Content Script: Received BEACON_THEME_SYNC event.", theme);
         if (theme) {
             console.log("Content Script: Sending SYNC_THEME message to background.");
-            chrome.runtime.sendMessage({
+            safeSendMessage({
                 type: 'SYNC_THEME',
                 theme: theme
             });

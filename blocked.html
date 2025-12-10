@@ -7,12 +7,14 @@
   <title>Focus Mode Active</title>
   <style>
     :root {
-      --primary-color: #2563eb;
-      --primary-hover: #1d4ed8;
-      --bg-gradient: linear-gradient(135deg, #93c5fd 0%, #3b82f6 100%);
+      --primary-color: #c41e3a;
+      --primary-hover: #a31830;
+      --bg-gradient: linear-gradient(135deg, #3b6fa0 0%, #0f1f33 100%);
       --card-bg: rgba(255, 255, 255, 0.95);
       --text-color: #1e293b;
       --text-secondary: #475569;
+      --link-color: #c41e3a;
+      --link-hover: #a31830;
     }
 
     body {
@@ -57,11 +59,9 @@
       margin: 0 auto 2rem auto;
       border-radius: 50%;
       background: #eff6ff;
-      /* Light blue bg */
       border: 4px solid white;
       box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
       overflow: hidden;
-      /* Clip waves */
       display: flex;
       justify-content: center;
       align-items: center;
@@ -73,45 +73,36 @@
       border-radius: 50%;
       object-fit: cover;
       z-index: 5;
-      /* Between waves */
       animation: float 3s ease-in-out infinite;
       position: relative;
-      /* margin-bottom removed to let it sit lower in the water */
     }
 
-    /* Waves Effect - Stage Prop Style */
     .wave {
       position: absolute;
       bottom: 0;
       left: 0;
       width: 200%;
-      /* Double width for looping */
       height: 50px;
-      /* Increased base height */
       background-repeat: repeat-x;
       background-position: 0 bottom;
       background-size: 50% 100%;
       animation: wave-move 4s linear infinite;
     }
 
-    /* Back Wave (Lighter, Slower) */
     .wave.back {
       z-index: 1;
       bottom: 15px;
-      /* Higher up */
       height: 60px;
-      background-image: url('data:image/svg+xml;utf8,<svg viewBox="0 0 120 28" xmlns="http://www.w3.org/2000/svg"><path d="M0 28 L0 10 Q30 0 60 10 T120 10 L120 28 Z" fill="%2393c5fd"/></svg>');
+      background-image: url('data:image/svg+xml;utf8,<svg viewBox="0 0 120 28" xmlns="http://www.w3.org/2000/svg"><path d="M0 28 L0 10 Q30 0 60 10 T120 10 L120 28 Z" fill="%2380DEEA"/></svg>');
       animation-duration: 6s;
       opacity: 0.7;
     }
 
-    /* Front Wave (Darker, Faster) */
     .wave.front {
       z-index: 10;
       bottom: -5px;
       height: 55px;
-      /* Taller to cover logo bottom */
-      background-image: url('data:image/svg+xml;utf8,<svg viewBox="0 0 120 28" xmlns="http://www.w3.org/2000/svg"><path d="M0 28 L0 10 Q30 0 60 10 T120 10 L120 28 Z" fill="%233b82f6"/></svg>');
+      background-image: url('data:image/svg+xml;utf8,<svg viewBox="0 0 120 28" xmlns="http://www.w3.org/2000/svg"><path d="M0 28 L0 10 Q30 0 60 10 T120 10 L120 28 Z" fill="%2326C6DA"/></svg>');
       animation-duration: 4s;
     }
 
@@ -143,7 +134,7 @@
       font-size: 2rem;
       font-weight: 800;
       margin: 0 0 1rem 0;
-      background: linear-gradient(to right, #2563eb, #1e40af);
+      background: linear-gradient(to right, #234b7a, #1a365d);
       -webkit-background-clip: text;
       background-clip: text;
       -webkit-text-fill-color: transparent;
@@ -155,6 +146,13 @@
       line-height: 1.6;
       margin-bottom: 2rem;
       font-weight: 500;
+    }
+
+    .button-group {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 1.5rem;
     }
 
     .btn {
@@ -183,6 +181,61 @@
     .btn:active {
       transform: translateY(0);
     }
+
+    .btn-outline {
+      background-color: transparent;
+      color: var(--text-secondary);
+      border: 1px solid var(--text-secondary);
+      box-shadow: none;
+    }
+
+    .btn-outline:hover {
+      background-color: rgba(0, 0, 0, 0.05);
+      color: var(--text-color);
+      border-color: var(--text-color);
+      box-shadow: none;
+    }
+
+    .btn-danger {
+      background-color: #dc2626;
+      color: white;
+      border: none;
+      box-shadow: 0 4px 6px -1px rgba(220, 38, 38, 0.4);
+    }
+
+    .btn-danger:hover {
+      background-color: #b91c1c;
+      box-shadow: 0 6px 8px -1px rgba(220, 38, 38, 0.5);
+    }
+
+    .btn-description {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      margin-top: -8px;
+      margin-bottom: 8px;
+    }
+
+    .link-section {
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid #e2e8f0;
+    }
+
+    .link-button {
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      color: var(--link-color);
+      text-decoration: underline;
+      font-size: 0.875rem;
+      font-family: inherit;
+      transition: color 0.2s ease;
+    }
+
+    .link-button:hover {
+      color: var(--link-hover);
+    }
   </style>
 </head>
 
@@ -191,11 +244,21 @@
     <div class="icon">
       <div class="wave back"></div>
       <div class="wave front"></div>
-      <img src="logo.jpg" alt="Beacon Blocker Logo">
+      <img src="logo.png" alt="Beacon Blocker Logo">
     </div>
     <h1>Turn towards the tide</h1>
     <p>Your beacon points elsewhere.</p>
-    <button id="go-back-btn" class="btn">Go Back</button>
+
+    <div class="button-group">
+      <button id="go-back-btn" class="btn btn-outline">Go to Google</button>
+      <button id="dashboard-btn" class="btn btn-outline">Open Dashboard</button>
+      <button id="close-tab-btn" class="btn btn-danger">Close Tab</button>
+    </div>
+
+    <div class="link-section">
+      <a href="#" id="report-bug-link" class="link-button">Report a Bug</a>
+      <p class="btn-description" style="margin-top: 4px;">Was this page blocked incorrectly?</p>
+    </div>
   </div>
 
   <script src="blocked.js"></script>

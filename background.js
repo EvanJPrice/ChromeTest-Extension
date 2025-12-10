@@ -1,5 +1,5 @@
 // FILE: background.js
-// VERSION: v7.5 (Robust Caching)
+// VERSION: v7.6 (Anti-Duplicate API Calls)
 
 console.log("BACKGROUND.JS SCRIPT STARTED");
 
@@ -7,6 +7,15 @@ const blockedPageUrl = chrome.runtime.getURL('blocked.html');
 const backendUrlBase = 'http://localhost:3000'; // Localhost for testing
 
 let tabState = {};
+
+// --- IN-FLIGHT REQUEST TRACKING ---
+// Prevents duplicate API calls for the same URL
+const pendingRequests = new Map(); // Map<normalizedUrl, Promise>
+
+// --- COOLDOWN-BASED DEDUPLICATION ---
+// Prevents re-checking the same URL within a short time window
+const recentlyProcessed = new Map(); // Map<normalizedUrl, timestamp>
+const PROCESSING_COOLDOWN_MS = 3000; // 3 second cooldown between checks of same URL
 
 // --- 1. ROBUST CACHING ---
 // --- 1. ROBUST CACHING (PERSISTENT) & PRIVACY ---
@@ -210,6 +219,25 @@ async function handlePageStateUpdate(message, sender) {
     state.lastProcessedUrl = url;
     state.lastProcessedTitle = title;
 
+    // --- COOLDOWN CHECK (Prevent rapid duplicate API calls) ---
+    const cacheKey = normalizeUrl(url);
+    const lastProcessedTime = recentlyProcessed.get(cacheKey);
+    if (lastProcessedTime && (Date.now() - lastProcessedTime < PROCESSING_COOLDOWN_MS)) {
+        console.log(`[DEDUP] Skipping ${cacheKey} - processed ${Date.now() - lastProcessedTime}ms ago`);
+        return;
+    }
+    recentlyProcessed.set(cacheKey, Date.now());
+
+    // Cleanup old entries periodically (prevent memory leak)
+    if (recentlyProcessed.size > 100) {
+        const now = Date.now();
+        for (const [key, time] of recentlyProcessed) {
+            if (now - time > PROCESSING_COOLDOWN_MS * 10) {
+                recentlyProcessed.delete(key);
+            }
+        }
+    }
+
     // Extract scraped data
     const { description, keywords, bodyText } = message.data;
 
@@ -356,43 +384,74 @@ async function handlePageCheck(pageData, tabId) {
         return;
     }
 
-    try {
-        const fetchUrl = `${backendUrlBase}/check-url`;
-        console.log(`[DEBUG] Fetching: ${fetchUrl}`);
-        const response = await fetch(fetchUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
-            body: JSON.stringify(pageData)
-        });
-
-        if (response.status === 401 || response.status === 403) {
-            console.log("Auth token invalid. Clearing and re-login.");
-            await chrome.storage.local.remove('authToken');
-            authToken = null;
-            openLogin();
-            return;
-        }
-
-        if (!response.ok) throw new Error(`Server error: ${response.status}`);
-        const data = await response.json();
-        console.log('Server decision for', targetUrl, 'is', data.decision);
-
-        // --- Cache Invalidation Check ---
-        if (data.cacheVersion) {
-            const { cacheVersion: localVersion } = await chrome.storage.local.get('cacheVersion');
-            if (!localVersion || data.cacheVersion > localVersion) {
-                console.log(`New rules detected (Server: ${data.cacheVersion}, Local: ${localVersion}). Clearing cache.`);
-                await handleClearLocalCache();
-                await chrome.storage.local.set({ cacheVersion: data.cacheVersion });
+    // --- IN-FLIGHT GUARD: Prevent duplicate requests ---
+    const cacheKey = normalizeUrl(targetUrl);
+    if (pendingRequests.has(cacheKey)) {
+        console.log(`[GUARD] Request already in-flight for ${cacheKey}. Waiting...`);
+        try {
+            const existingResult = await pendingRequests.get(cacheKey);
+            if (existingResult?.decision === 'BLOCK') {
+                blockPage(tabId, targetUrl);
             }
+            return;
+        } catch (e) {
+            // If the pending request failed, we'll try again
+            console.log(`[GUARD] Pending request failed, retrying...`);
         }
+    }
 
-        await setCache(targetUrl, { decision: data.decision, title: pageData.title });
-        if (data.decision === 'BLOCK') {
+    // Create a promise for this request that others can await
+    const requestPromise = (async () => {
+        try {
+            const fetchUrl = `${backendUrlBase}/check-url`;
+            console.log(`[API CALL] Fetching: ${fetchUrl} for ${cacheKey}`);
+            const response = await fetch(fetchUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+                body: JSON.stringify(pageData)
+            });
+
+            if (response.status === 401 || response.status === 403) {
+                console.log("Auth token invalid. Clearing and re-login.");
+                await chrome.storage.local.remove('authToken');
+                authToken = null;
+                openLogin();
+                return null;
+            }
+
+            if (!response.ok) throw new Error(`Server error: ${response.status}`);
+            const data = await response.json();
+            console.log('Server decision for', targetUrl, 'is', data.decision);
+
+            // --- Cache Invalidation Check ---
+            if (data.cacheVersion) {
+                const { cacheVersion: localVersion } = await chrome.storage.local.get('cacheVersion');
+                if (!localVersion || data.cacheVersion > localVersion) {
+                    console.log(`New rules detected (Server: ${data.cacheVersion}, Local: ${localVersion}). Clearing cache.`);
+                    await handleClearLocalCache();
+                    await chrome.storage.local.set({ cacheVersion: data.cacheVersion });
+                }
+            }
+
+            await setCache(targetUrl, { decision: data.decision, title: pageData.title });
+            return data;
+        } catch (error) {
+            console.error('Error in handlePageCheck:', error);
+            throw error;
+        }
+    })();
+
+    // Register this request as pending
+    pendingRequests.set(cacheKey, requestPromise);
+
+    try {
+        const data = await requestPromise;
+        if (data?.decision === 'BLOCK') {
             blockPage(tabId, targetUrl);
         }
-    } catch (error) {
-        console.error('Error in handlePageCheck:', error);
+    } finally {
+        // Clean up after request completes
+        pendingRequests.delete(cacheKey);
     }
 }
 async function sendLogEvent(logData) {
