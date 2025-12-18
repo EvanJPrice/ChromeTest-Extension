@@ -1,18 +1,28 @@
 // content-script.js (v36 - Safe Chrome API Wrapper)
-console.log("CONTENT SCRIPT INJECTED");
 
 // --- Safe Chrome API wrapper ---
 // Prevents "Extension context invalidated" errors after extension reload
-function safeSendMessage(message) {
+function safeSendMessage(message, callback) {
     try {
-        if (chrome.runtime && chrome.runtime.id) {
-            chrome.runtime.sendMessage(message);
-        }
+        chrome.runtime.sendMessage(message, (response) => {
+            if (chrome.runtime.lastError) {
+                // console.log('[BCB] Runtime error (expected if disconnected):', chrome.runtime.lastError.message);
+                return;
+            }
+            if (callback) callback(response);
+        });
     } catch (e) {
+        // console.log('[BCB] Send message failed (expected if disconnected):', e.message);
         // Extension was reloaded, this content script is stale
-        console.log("Content Script: Extension context invalidated. Please refresh this page.");
     }
 }
+
+// --- Message Bridge from Background ---
+chrome.runtime.onMessage.addListener((message) => {
+    if (message.type === 'BRIDGE_EVENT') {
+        window.dispatchEvent(new CustomEvent(message.eventType, { detail: message.detail }));
+    }
+});
 
 let lastSentTitle = "";
 let lastSentUrl = "";
@@ -26,7 +36,6 @@ const DEBOUNCE_DELAY_MS = 1500; // Increased from 1000 to 1500ms
 function sendUpdate() {
     // Don't reset the timer if an update is already scheduled
     if (isUpdatePending) {
-        console.log("Content Script: Update already pending, ignoring trigger.");
         return;
     }
 
@@ -40,9 +49,13 @@ function sendUpdate() {
         // Reset the lock first thing
         isUpdatePending = false;
 
+        // Don't send updates for internal extension pages
+        if (window.location.protocol === 'chrome-extension:') {
+            return;
+        }
+
         // Basic debounce: only send an update if the title OR URL has actually changed.
         if (currentTitle === lastSentTitle && currentUrl === lastSentUrl) {
-            console.log("Content Script: No change detected, skipping update.");
             return;
         }
 
@@ -60,7 +73,6 @@ function sendUpdate() {
         // Get first 500 chars of body text, cleaning up whitespace
         const bodyText = document.body.innerText.replace(/\s+/g, ' ').substring(0, 500);
 
-        console.log(`Content Script: Sending update for "${currentTitle}" at ${currentUrl}`);
         safeSendMessage({
             type: 'PAGE_STATE_UPDATE',
             data: {
@@ -99,10 +111,9 @@ if (titleElement) {
 
 // --- Dashboard Integration ---
 // This allows the web dashboard to know if the extension is installed and logged in.
-const DASHBOARD_URLS = ['localhost:5173', 'localhost:5174', 'localhost:5175', 'chrome-test-dashboard.vercel.app'];
+const DASHBOARD_URLS = typeof BEACON_CONFIG !== 'undefined' ? BEACON_CONFIG.DASHBOARD_DOMAINS : ['beaconblocker.vercel.app', 'chrome-test-dashboard.vercel.app'];
 
 if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
-    console.log("Beacon Blocker: Dashboard detected. Injecting status marker.");
 
     const injectMarker = async () => {
         const { authToken } = await chrome.storage.local.get('authToken');
@@ -135,14 +146,12 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
     // --- Cache Invalidation Bridge ---
     // Listen for CustomEvent from the Dashboard (App.jsx)
     window.addEventListener('BEACON_RULES_UPDATED', (event) => {
-        console.log("Content Script: Received BEACON_RULES_UPDATED event. Clearing cache.");
         safeSendMessage({ type: 'CLEAR_LOCAL_CACHE' });
     });
 
     // --- Auth Sync Bridge ---
     document.addEventListener('BEACON_AUTH_SYNC', (event) => {
         const { token, email } = event.detail;
-        console.log("Content Script: Received BEACON_AUTH_SYNC event.", email);
         if (token && email) {
             safeSendMessage({
                 type: 'SYNC_AUTH',
@@ -154,16 +163,13 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
 
     // --- Auth Logout Bridge ---
     document.addEventListener('BEACON_AUTH_LOGOUT', () => {
-        console.log("Content Script: Received BEACON_AUTH_LOGOUT event.");
         safeSendMessage({ type: 'LOGOUT' });
     });
 
     // --- Theme Sync Bridge ---
     document.addEventListener('BEACON_THEME_SYNC', (event) => {
         const { theme } = event.detail;
-        console.log("Content Script: Received BEACON_THEME_SYNC event.", theme);
         if (theme) {
-            console.log("Content Script: Sending SYNC_THEME message to background.");
             safeSendMessage({
                 type: 'SYNC_THEME',
                 theme: theme
@@ -174,12 +180,10 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
     // --- Block Log Fetch Bridge (Privacy-First) ---
     // Dashboard requests block logs via CustomEvent, we respond with local storage data
     document.addEventListener('BEACON_GET_BLOCK_LOG', async () => {
-        // console.log("Content Script: Received BEACON_GET_BLOCK_LOG request.");
         try {
             // Request block log from background script
             chrome.runtime.sendMessage({ type: 'GET_BLOCK_LOG' }, (response) => {
                 if (response?.success) {
-                    // console.log("Content Script: Got block log, dispatching response.", response.logs?.length || 0, "entries");
                     // Dispatch response event with logs
                     window.dispatchEvent(new CustomEvent('BEACON_BLOCK_LOG_RESPONSE', {
                         detail: { logs: response.logs }
@@ -200,7 +204,6 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
 
     // --- Block Log Clear Bridge ---
     document.addEventListener('BEACON_CLEAR_BLOCK_LOG', () => {
-        console.log("Content Script: Received BEACON_CLEAR_BLOCK_LOG request.");
         safeSendMessage({ type: 'CLEAR_BLOCK_LOG' });
     });
 }

@@ -22,6 +22,7 @@
       --dashboard-btn-hover: #eff6ff;
       --link-color: #2563eb;
       --link-hover: #1d4ed8;
+      --status-success: #166534;
     }
 
     @media (prefers-color-scheme: dark) {
@@ -42,10 +43,12 @@
         --dashboard-btn-hover: #334155;
         --link-color: #60a5fa;
         --link-hover: #93c5fd;
+        --status-success: #4ade80;
       }
     }
 
-    body[data-theme='dark'] {
+    body[data-theme='dark'],
+    html[data-theme='dark'] {
       --bg-color: #0f172a;
       --container-bg: #1e293b;
       --text-color: #f8fafc;
@@ -62,9 +65,13 @@
       --dashboard-btn-hover: #334155;
       --link-color: #60a5fa;
       --link-hover: #93c5fd;
+      --status-success: #4ade80;
+      background-color: var(--container-bg);
+      color: var(--text-color);
     }
 
-    body[data-theme='light'] {
+    body[data-theme='light'],
+    html[data-theme='light'] {
       --bg-color: #f4f4f4;
       --container-bg: #ffffff;
       --text-color: #000000;
@@ -81,26 +88,29 @@
       --dashboard-btn-hover: #eff6ff;
       --link-color: #2563eb;
       --link-hover: #1d4ed8;
+      --status-success: #166534;
+      background-color: var(--container-bg);
+      color: var(--text-color);
     }
+
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background-color: var(--bg-color);
+      background-color: var(--container-bg);
       color: var(--text-color);
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 200px;
+      width: 400px;
       margin: 0;
+      padding: 20px 30px;
+      box-sizing: border-box;
     }
 
     .container {
-      width: 400px;
+      width: 100%;
       text-align: center;
-      background-color: var(--container-bg);
-      padding: 20px 30px;
-      border-radius: 12px;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+      background-color: transparent;
+      padding: 0;
+      border-radius: 0;
+      box-shadow: none;
     }
 
     input {
@@ -217,11 +227,46 @@
       background-color: #1d4ed8;
     }
 
+    .status-success-container {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-top: 15px;
+      padding: 10px;
+      background-color: var(--container-bg);
+      border-radius: 6px;
+      animation: fadeIn 0.3s ease;
+    }
+
+    .status-icon {
+      width: 18px;
+      height: 18px;
+      fill: var(--status-success);
+    }
+
+    .status-text {
+      color: var(--status-success);
+      font-weight: 600;
+      font-size: 0.95rem;
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(-5px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
     #status {
       margin-top: 10px;
-      font-size: 0.9rem;
-      color: green;
-      height: 1em;
+      min-height: 40px;
+      /* Reserve space */
     }
 
     /* --- Link Button (Standardized) --- */
@@ -264,8 +309,8 @@
 <body>
   <div class="container">
     <img src="logo.png" alt="Beacon Blocker Logo"
-      style="width: 60px; height: 60px; border-radius: 50%; margin-bottom: 10px; object-fit: cover;">
-    <h2 style="margin-top: 0;">Beacon Blocker</h2>
+      style="width: 80px; height: 80px; border-radius: 50%; margin-bottom: 8px; object-fit: cover;">
+    <h2 style="margin-top: 0; font-size: 1.5rem; margin-bottom: 20px;">Beacon Blocker</h2>
 
     <div id="auth-section">
       <!-- Content injected by JS -->
@@ -292,6 +337,7 @@
     </div>
   </div>
 
+  <script src="config.js"></script>
   <script src="options.js"></script>
 </body>
 

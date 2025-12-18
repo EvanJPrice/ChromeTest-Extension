@@ -3,14 +3,15 @@
 async function updateUI() {
     const { authToken, userEmail, theme } = await chrome.storage.local.get(['authToken', 'userEmail', 'theme']);
 
-    // Apply Theme
+    // Apply Theme to html element for consistency with dashboard
     if (theme === 'dark') {
-        document.body.setAttribute('data-theme', 'dark');
+        document.documentElement.setAttribute('data-theme', 'dark');
     } else if (theme === 'light') {
-        document.body.setAttribute('data-theme', 'light');
+        document.documentElement.setAttribute('data-theme', 'light');
     } else {
-        // System - remove attribute to let media query handle it
-        document.body.removeAttribute('data-theme');
+        // Fallback: If no theme is set, default to system preference
+        // We remove the attribute to let the CSS @media query handle it naturally.
+        document.documentElement.removeAttribute('data-theme');
     }
 
     const authSection = document.getElementById('auth-section');
@@ -52,7 +53,7 @@ async function updateUI() {
 // Event Handlers
 document.getElementById('login-btn').addEventListener('click', () => {
     // Unified Login: Open Dashboard
-    chrome.tabs.create({ url: 'http://localhost:5173' });
+    chrome.tabs.create({ url: BEACON_CONFIG.DASHBOARD_URL });
 });
 
 let logoutConfirmTimer = null;
@@ -77,7 +78,7 @@ document.getElementById('logout-btn').addEventListener('click', async (e) => {
         await chrome.storage.local.remove(['authToken', 'userEmail']);
 
         // 2. Open Dashboard to trigger Supabase Sign Out
-        chrome.tabs.create({ url: 'http://localhost:5173?logout=true' });
+        chrome.tabs.create({ url: BEACON_CONFIG.DASHBOARD_URL + '?logout=true' });
 
         updateUI();
     }
@@ -103,8 +104,23 @@ document.getElementById('clear-cache').addEventListener('click', (e) => {
 
         chrome.runtime.sendMessage({ type: 'CLEAR_LOCAL_CACHE' }, (response) => {
             const status = document.getElementById('status');
-            status.textContent = response?.success ? 'Cache cleared.' : 'Error clearing cache.';
-            setTimeout(() => status.textContent = '', 2000);
+            if (response?.success) {
+                status.innerHTML = `
+                    <div class="status-success-container">
+                        <svg class="status-icon" viewBox="0 0 24 24">
+                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                        </svg>
+                        <span class="status-text">System Cache Reset</span>
+                    </div>
+                `;
+            } else {
+                status.textContent = 'Error clearing cache.';
+                status.style.color = 'red';
+            }
+
+            setTimeout(() => {
+                status.innerHTML = '';
+            }, 3000);
 
             // Reset button immediately
             btn.textContent = 'Clear Cache';
@@ -114,13 +130,13 @@ document.getElementById('clear-cache').addEventListener('click', (e) => {
 });
 
 document.getElementById('dashboard-btn').addEventListener('click', () => {
-    chrome.tabs.create({ url: 'http://localhost:5173' });
+    chrome.tabs.create({ url: BEACON_CONFIG.DASHBOARD_URL });
 });
 
 document.getElementById('report-bug-link').addEventListener('click', (e) => {
     e.preventDefault();
-    const dashboardUrl = 'http://localhost:5173';
-    const bugReportUrl = 'http://localhost:5173?reportBug=true';
+    const dashboardUrl = BEACON_CONFIG.DASHBOARD_URL;
+    const bugReportUrl = BEACON_CONFIG.DASHBOARD_URL + '?reportBug=true';
 
     chrome.tabs.query({ url: `${dashboardUrl}/*` }, (tabs) => {
         if (tabs.length > 0) {
@@ -136,8 +152,8 @@ document.getElementById('report-bug-link').addEventListener('click', (e) => {
 
 document.getElementById('feature-idea-link').addEventListener('click', (e) => {
     e.preventDefault();
-    const dashboardUrl = 'http://localhost:5173';
-    const featureUrl = 'http://localhost:5173?shareFeature=true';
+    const dashboardUrl = BEACON_CONFIG.DASHBOARD_URL;
+    const featureUrl = BEACON_CONFIG.DASHBOARD_URL + '?shareFeature=true';
 
     chrome.tabs.query({ url: `${dashboardUrl}/*` }, (tabs) => {
         if (tabs.length > 0) {

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Beacon Blocker",
   "version": "1.0",
-  "description": "Intelligently blocks sites using page content.",
+  "description": "AI-powered content blocker that helps you stay focused by blocking distracting websites based on your personal goals.",
   "icons": {
     "48": "logo.jpg",
     "128": "logo.jpg"
@@ -25,7 +25,7 @@
   "options_page": "options.html",
   "action": {
     "default_popup": "options.html",
-    "default_title": "AI Blocker Settings"
+    "default_title": "Beacon Blocker"
   },
   "content_scripts": [
     {
@@ -33,6 +33,7 @@
         "<all_urls>"
       ],
       "js": [
+        "config.js",
         "content-script.js"
       ],
       "run_at": "document_idle",
@@ -41,7 +42,6 @@
   ],
   "externally_connectable": {
     "matches": [
-      "http://localhost:*/*",
       "https://*.vercel.app/*",
       "https://*.netlify.app/*"
     ]

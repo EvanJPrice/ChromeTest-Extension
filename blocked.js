@@ -3,7 +3,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const goBackBtn = document.getElementById('go-back-btn');
     if (goBackBtn) {
         goBackBtn.addEventListener('click', () => {
-            console.log("Go to Google clicked");
             window.location.href = 'https://www.google.com';
         });
     }
@@ -12,7 +11,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const closeTabBtn = document.getElementById('close-tab-btn');
     if (closeTabBtn) {
         closeTabBtn.addEventListener('click', () => {
-            console.log("Close Tab clicked");
             window.close();
         });
     }
@@ -21,8 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const dashboardBtn = document.getElementById('dashboard-btn');
     if (dashboardBtn) {
         dashboardBtn.addEventListener('click', () => {
-            console.log("Dashboard clicked - Opening Dashboard");
-            chrome.tabs.create({ url: 'http://localhost:5173' });
+            chrome.tabs.create({ url: BEACON_CONFIG.DASHBOARD_URL });
         });
     }
 
@@ -31,9 +28,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (reportBugLink) {
         reportBugLink.addEventListener('click', (e) => {
             e.preventDefault();
-            console.log("Report Bug clicked - Opening Bug Report");
-            const dashboardUrl = 'http://localhost:5173';
-            const bugReportUrl = 'http://localhost:5173?reportBug=true';
+            const dashboardUrl = BEACON_CONFIG.DASHBOARD_URL;
+            const bugReportUrl = BEACON_CONFIG.DASHBOARD_URL + '?reportBug=true';
 
             chrome.tabs.query({ url: `${dashboardUrl}/*` }, (tabs) => {
                 if (tabs.length > 0) {

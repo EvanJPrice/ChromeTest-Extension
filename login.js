@@ -1,7 +1,6 @@
 const SUPABASE_URL = 'https://puhutwfwaxohanpbsmtd.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB1aHV0d2Z3YXhvaGFucGJzbXRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2MjU4OTAsImV4cCI6MjA3NjIwMTg5MH0.K--sv4BJ52W4wui2lDkBlTcIw6RZN7xFvod4DPz42B8';
-// const backendUrlBase = 'https://chrometest.onrender.com';
-const backendUrlBase = 'http://localhost:3000'; // Use local backend for development
+const backendUrlBase = BEACON_CONFIG.BACKEND_URL;
 
 // --- OAuth Handler ---
 document.getElementById('googleLogin').addEventListener('click', async () => {
@@ -12,7 +11,6 @@ document.getElementById('googleLogin').addEventListener('click', async () => {
         const redirectUrl = chrome.identity.getRedirectURL();
         const authUrl = `${SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=${redirectUrl}`;
 
-        console.log("Launching OAuth flow:", authUrl);
 
         chrome.identity.launchWebAuthFlow({
             url: authUrl,
@@ -26,7 +24,6 @@ document.getElementById('googleLogin').addEventListener('click', async () => {
             }
 
             if (redirectedTo) {
-                console.log("OAuth Success. Redirected to:", redirectedTo);
 
                 // Parse the URL fragment (hash)
                 const url = new URL(redirectedTo);
@@ -195,7 +192,6 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
                 if (loginResponse.ok) {
                     const loginData = await loginResponse.json();
                     if (loginData.session?.access_token) {
-                        console.log("Auto-login successful during signup");
                         await handleLoginSuccess(loginData.session.access_token);
                         return;
                     }
@@ -223,7 +219,6 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
         }
 
         data = await response.json();
-        console.log("Signup Response Data:", data);
 
         if (!response.ok) {
             throw new Error(data.error || data.msg || data.error_description || 'Authentication failed');
@@ -236,11 +231,9 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
             const createdAt = new Date(data.created_at).getTime();
             const now = Date.now();
             const diff = now - createdAt;
-            console.log("Duplicate Check:", { createdAt: data.created_at, now, diff });
 
             // If account was created more than 30 seconds ago, it's an existing account
             if (diff > 30000) {
-                console.warn("Existing user detected! Throwing error.");
                 throw new Error("User already registered");
             }
         }
@@ -337,7 +330,7 @@ async function handleLoginSuccess(token, providedEmail = null) {
     // Auto-redirect after 1.5 seconds
     setTimeout(() => {
         // Open Dashboard using Chrome API (more robust than window.open)
-        chrome.tabs.create({ url: 'http://localhost:5173' }, () => {
+        chrome.tabs.create({ url: BEACON_CONFIG.DASHBOARD_URL }, () => {
             // Close Login Window after tab is created
             window.close();
         });
