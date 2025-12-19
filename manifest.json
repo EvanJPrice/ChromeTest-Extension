@@ -22,7 +22,12 @@
   "options_page": "options.html",
   "action": {
     "default_popup": "options.html",
-    "default_title": "Beacon Blocker"
+    "default_title": "Beacon Blocker",
+    "default_icon": {
+      "16": "logo.png",
+      "48": "logo.png",
+      "128": "logo.png"
+    }
   },
   "content_scripts": [
     {
