@@ -735,13 +735,25 @@ async function handlePageCheck(pageData, tabId) {
                 }
             }
 
-            // Skip caching for time-sensitive decisions (they contain time remaining info)
-            // This ensures the AI is re-consulted when the timer may have expired
+            // Skip caching for time-sensitive decisions (they contain time remaining info or clock times)
+            // This ensures the AI/server is re-consulted when the timer/clock may have changed
+            const reasonLower = data.reason ? data.reason.toLowerCase() : '';
             const isTimeSensitive = data.reason && (
-                /\d+\s*(min|sec|hour)/i.test(data.reason) ||
-                data.reason.toLowerCase().includes('left)') ||
-                data.reason.toLowerCase().includes('timer') ||
-                data.reason.toLowerCase().includes('expired')
+                /\d+\s*(min|sec|hour)/i.test(data.reason) ||  // "30 minutes left"
+                /\d{1,2}:\d{2}\s*(am|pm)/i.test(data.reason) || // "until 4:33 PM"
+                /\d{1,2}\s*(am|pm)/i.test(data.reason) ||      // "until 5pm"
+                reasonLower.includes('left)') ||
+                reasonLower.includes('until') ||
+                reasonLower.includes('till') ||
+                reasonLower.includes('through') ||
+                reasonLower.includes('before') ||
+                reasonLower.includes('after') ||
+                reasonLower.includes('starting') ||
+                reasonLower.includes('noon') ||
+                reasonLower.includes('midnight') ||
+                reasonLower.includes('timer') ||
+                reasonLower.includes('expired') ||
+                reasonLower.includes('clock')
             );
 
             if (!isTimeSensitive) {
