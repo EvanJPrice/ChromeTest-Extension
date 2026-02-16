@@ -1,4 +1,28 @@
-// content-script.js (v36 - Safe Chrome API Wrapper)
+// content-script.js (v38 - Event Listener Cleanup)
+
+// Conditional logging - only log in development mode
+const IS_DEV_CONTENT = typeof BEACON_CONFIG !== 'undefined' && BEACON_CONFIG.BACKEND_URL.includes('localhost');
+function debugLog(...args) {
+    if (IS_DEV_CONTENT) {
+        console.log(...args);
+    }
+}
+
+// --- EVENT LISTENER TRACKING (for cleanup on page unload) ---
+const registeredListeners = [];
+
+function addTrackedListener(target, eventType, handler) {
+    target.addEventListener(eventType, handler);
+    registeredListeners.push({ target, eventType, handler });
+}
+
+// Cleanup all registered listeners on page unload
+window.addEventListener('pagehide', () => {
+    registeredListeners.forEach(({ target, eventType, handler }) => {
+        target.removeEventListener(eventType, handler);
+    });
+    registeredListeners.length = 0;
+});
 
 // --- Safe Chrome API wrapper ---
 // Prevents "Extension context invalidated" errors after extension reload
@@ -30,7 +54,7 @@ let isUpdatePending = false; // Lock to prevent overlapping updates
 
 // Function to send the current page state to the background script
 let updateTimeout = null;
-const DEBOUNCE_DELAY_MS = 1500; // Increased from 1000 to 1500ms
+const DEBOUNCE_DELAY_MS = 800; // Reduced for faster blocking (was 1500ms)
 
 // Function to send the current page state to the background script
 function sendUpdate() {
@@ -70,8 +94,32 @@ function sendUpdate() {
         // --- Scrape Context for AI ---
         const description = document.querySelector('meta[name="description"]')?.content || "";
         const keywords = document.querySelector('meta[name="keywords"]')?.content || "";
-        // Get first 500 chars of body text, cleaning up whitespace
-        const bodyText = document.body.innerText.replace(/\s+/g, ' ').substring(0, 500);
+
+        // --- Body Text Snippet (500 words max) ---
+        // This gives Gemini context to make nuanced decisions like
+        // "YouTube video about coding" vs "YouTube video about gaming"
+        let bodySnippet = "";
+        try {
+            // Get visible text from main content areas
+            const contentSelectors = ['main', 'article', '[role="main"]', '.content', '#content', 'body'];
+            let contentElement = null;
+            for (const selector of contentSelectors) {
+                contentElement = document.querySelector(selector);
+                if (contentElement) break;
+            }
+
+            if (contentElement) {
+                // Get text, remove scripts/styles, collapse whitespace
+                const text = contentElement.innerText || contentElement.textContent || "";
+                // Clean up: collapse whitespace, trim
+                const cleanText = text.replace(/\s+/g, ' ').trim();
+                // Take first 500 words (roughly 2500 chars)
+                const words = cleanText.split(' ').slice(0, 500);
+                bodySnippet = words.join(' ');
+            }
+        } catch (e) {
+            // Silently fail - bodySnippet remains empty
+        }
 
         safeSendMessage({
             type: 'PAGE_STATE_UPDATE',
@@ -80,7 +128,7 @@ function sendUpdate() {
                 title: currentTitle,
                 description: description,
                 keywords: keywords,
-                bodyText: bodyText
+                bodySnippet: bodySnippet
             }
         });
     }, DEBOUNCE_DELAY_MS);
@@ -88,8 +136,8 @@ function sendUpdate() {
 
 // --- Triggers ---
 
-// 1. On initial load (slightly longer delay to ensure page is ready)
-setTimeout(sendUpdate, 800);
+// 1. On initial load (reduced delay for faster blocking - was 800ms)
+setTimeout(sendUpdate, 200);
 
 // 2. For YouTube's SPA navigation
 document.addEventListener('yt-navigate-finish', () => {
@@ -113,7 +161,19 @@ if (titleElement) {
 // This allows the web dashboard to know if the extension is installed and logged in.
 const DASHBOARD_URLS = typeof BEACON_CONFIG !== 'undefined' ? BEACON_CONFIG.DASHBOARD_DOMAINS : ['beaconblocker.vercel.app', 'chrome-test-dashboard.vercel.app'];
 
+// Extra validation for sensitive operations - ensures we're actually on a trusted dashboard
+function isOnTrustedDashboard() {
+    const currentHost = window.location.host.toLowerCase(); // Use .host to include port
+    return DASHBOARD_URLS.some(domain =>
+        currentHost === domain || currentHost.endsWith('.' + domain)
+    );
+}
+
+debugLog('[BCB] Content script loaded');
+debugLog('[BCB] Is dashboard:', DASHBOARD_URLS.some(url => window.location.href.includes(url)));
+
 if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
+    debugLog('[BCB] Dashboard detected! Setting up bridges...');
 
     const injectMarker = async () => {
         const { authToken } = await chrome.storage.local.get('authToken');
@@ -129,6 +189,7 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
         marker.setAttribute('data-installed', 'true');
         marker.setAttribute('data-logged-in', authToken ? 'true' : 'false');
         marker.setAttribute('data-version', chrome.runtime.getManifest().version);
+        marker.setAttribute('data-extension-id', chrome.runtime.id);
 
         // Dispatch event so React knows to check immediately
         window.dispatchEvent(new CustomEvent('beacon-extension-update'));
@@ -145,14 +206,20 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
 
     // --- Cache Invalidation Bridge ---
     // Listen for CustomEvent from the Dashboard (App.jsx)
-    window.addEventListener('BEACON_RULES_UPDATED', (event) => {
+    addTrackedListener(window, 'BEACON_RULES_UPDATED', () => {
         safeSendMessage({ type: 'CLEAR_LOCAL_CACHE' });
     });
 
     // --- Auth Sync Bridge ---
-    document.addEventListener('BEACON_AUTH_SYNC', (event) => {
+    // Extra validation for auth operations to prevent injection attacks
+    addTrackedListener(document, 'BEACON_AUTH_SYNC', (event) => {
+        if (!isOnTrustedDashboard()) {
+            console.warn('[BCB] Auth sync rejected - not on trusted dashboard. Host:', window.location.host);
+            return;
+        }
         const { token, email } = event.detail;
         if (token && email) {
+            console.log('[BCB] Auth sync accepted for:', email);
             safeSendMessage({
                 type: 'SYNC_AUTH',
                 token: token,
@@ -162,12 +229,16 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
     });
 
     // --- Auth Logout Bridge ---
-    document.addEventListener('BEACON_AUTH_LOGOUT', () => {
+    addTrackedListener(document, 'BEACON_AUTH_LOGOUT', () => {
+        if (!isOnTrustedDashboard()) {
+            console.warn('[BCB] Logout rejected - not on trusted dashboard');
+            return;
+        }
         safeSendMessage({ type: 'LOGOUT' });
     });
 
     // --- Theme Sync Bridge ---
-    document.addEventListener('BEACON_THEME_SYNC', (event) => {
+    addTrackedListener(document, 'BEACON_THEME_SYNC', (event) => {
         const { theme } = event.detail;
         if (theme) {
             safeSendMessage({
@@ -177,9 +248,19 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
         }
     });
 
+    // --- Pause Sync Bridge ---
+    addTrackedListener(document, 'BEACON_PAUSE_SYNC', (event) => {
+        const { paused } = event.detail;
+        debugLog('[BCB] Syncing pause state:', paused);
+        safeSendMessage({
+            type: 'SYNC_PAUSE',
+            paused: paused
+        });
+    });
+
     // --- Block Log Fetch Bridge (Privacy-First) ---
     // Dashboard requests block logs via CustomEvent, we respond with local storage data
-    document.addEventListener('BEACON_GET_BLOCK_LOG', async () => {
+    addTrackedListener(document, 'BEACON_GET_BLOCK_LOG', async () => {
         try {
             // Request block log from background script
             chrome.runtime.sendMessage({ type: 'GET_BLOCK_LOG' }, (response) => {
@@ -203,13 +284,48 @@ if (DASHBOARD_URLS.some(url => window.location.href.includes(url))) {
     });
 
     // --- Block Log Clear Bridge ---
-    document.addEventListener('BEACON_CLEAR_BLOCK_LOG', () => {
+    addTrackedListener(document, 'BEACON_CLEAR_BLOCK_LOG', () => {
         safeSendMessage({ type: 'CLEAR_BLOCK_LOG' });
     });
 
     // --- Single Log Delete Bridge ---
-    document.addEventListener('BEACON_DELETE_SINGLE_LOG', (event) => {
+    addTrackedListener(document, 'BEACON_DELETE_SINGLE_LOG', (event) => {
         const { timestamp } = event.detail;
         safeSendMessage({ type: 'DELETE_SINGLE_LOG', timestamp });
+    });
+
+    // --- Activity Log Settings Bridge ---
+    addTrackedListener(document, 'BEACON_ACTIVITY_LOG_SETTINGS_SYNC', (event) => {
+        const { autoDelete, retentionDays, logAllowDecisions } = event.detail;
+        safeSendMessage({
+            type: 'SYNC_ACTIVITY_LOG_SETTINGS',
+            autoDelete,
+            retentionDays,
+            logAllowDecisions
+        });
+    });
+
+    // --- Pause State Bridge (Dashboard reads current pause state from extension) ---
+    addTrackedListener(document, 'BEACON_GET_PAUSE_STATE', () => {
+        safeSendMessage({ type: 'GET_PAUSE_STATE' }, (response) => {
+            window.dispatchEvent(new CustomEvent('BEACON_PAUSE_STATE_RESPONSE', {
+                detail: { paused: response?.paused ?? false }
+            }));
+        });
+    });
+
+    // --- Storage Usage Bridge ---
+    addTrackedListener(document, 'BEACON_GET_STORAGE_USAGE', () => {
+        safeSendMessage({ type: 'GET_STORAGE_USAGE' }, (response) => {
+            if (response?.success) {
+                window.dispatchEvent(new CustomEvent('BEACON_STORAGE_USAGE_RESPONSE', {
+                    detail: { used: response.used, max: response.max }
+                }));
+            } else {
+                window.dispatchEvent(new CustomEvent('BEACON_STORAGE_USAGE_RESPONSE', {
+                    detail: { used: 0, max: 10485760 }
+                }));
+            }
+        });
     });
 }

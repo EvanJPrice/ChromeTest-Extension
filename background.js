@@ -1,13 +1,23 @@
 // FILE: background.js
-// VERSION: v7.6 (Anti-Duplicate API Calls)
+// VERSION: v7.7 (Privacy & Security Improvements)
 
 // Import centralized config
 importScripts('config.js');
+
+// Conditional logging - only log in development mode
+function debugLog(...args) {
+    if (typeof IS_DEV !== 'undefined' && IS_DEV) {
+        console.log(...args);
+    }
+}
 
 const blockedPageUrl = chrome.runtime.getURL('blocked.html');
 const backendUrlBase = BEACON_CONFIG.BACKEND_URL;
 
 let tabState = {};
+
+// --- TAB LOCKING (Prevents race conditions) ---
+const tabLocks = new Map(); // Map<tabId, Promise>
 
 // --- IN-FLIGHT REQUEST TRACKING ---
 // Prevents duplicate API calls for the same URL
@@ -17,6 +27,90 @@ const pendingRequests = new Map(); // Map<normalizedUrl, Promise>
 // Prevents re-checking the same URL within a short time window
 const recentlyProcessed = new Map(); // Map<normalizedUrl, timestamp>
 const PROCESSING_COOLDOWN_MS = 3000; // 3 second cooldown between checks of same URL
+
+// --- ENGAGEMENT EVENT TRACKING ---
+// Send engagement events to backend for weekly reports (pause, unpause, strict mode, etc.)
+async function sendEngagementEvent(eventType, metadata = {}) {
+    try {
+        const { authToken } = await chrome.storage.local.get('authToken');
+        if (!authToken) {
+            debugLog('[ENGAGEMENT] No auth token, skipping event:', eventType);
+            return;
+        }
+
+        const response = await fetch(`${backendUrlBase}/api/engagement-event`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${authToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ event_type: eventType, metadata })
+        });
+
+        if (response.ok) {
+            debugLog('[ENGAGEMENT] Event sent:', eventType);
+        } else {
+            console.warn('[ENGAGEMENT] Failed to send event:', eventType, response.status);
+        }
+    } catch (err) {
+        // Fire and forget - don't break functionality if tracking fails
+        console.warn('[ENGAGEMENT] Error sending event:', eventType, err.message);
+    }
+}
+
+// --- API RETRY LOGIC WITH TIMEOUT ---
+const API_TIMEOUT_MS = 10000; // 10 second timeout
+const API_MAX_RETRIES = 2;
+
+async function fetchWithTimeout(url, options, timeoutMs = API_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+        debugLog(`[FETCH DEBUG] Aborting after ${timeoutMs}ms timeout`);
+        controller.abort();
+    }, timeoutMs);
+
+    try {
+        const bodySize = options?.body ? options.body.length : 0;
+        debugLog(`[FETCH DEBUG] Starting fetch to ${url} (body: ${bodySize} bytes)`);
+        const fetchStart = Date.now();
+        const response = await fetch(url, {
+            ...options,
+            signal: controller.signal
+        });
+        debugLog(`[FETCH DEBUG] Response received in ${Date.now() - fetchStart}ms, status: ${response.status}`);
+        clearTimeout(timeoutId);
+        return response;
+    } catch (error) {
+        clearTimeout(timeoutId);
+        debugLog(`[FETCH DEBUG] Fetch error: ${error.name} - ${error.message}`);
+        if (error.name === 'AbortError') {
+            throw new Error('Request timeout');
+        }
+        throw error;
+    }
+}
+
+async function fetchWithRetry(url, options, maxRetries = API_MAX_RETRIES) {
+    let lastError;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            const response = await fetchWithTimeout(url, options);
+            return response;
+        } catch (error) {
+            lastError = error;
+            debugLog(`[API] Attempt ${attempt + 1} failed:`, error.message);
+
+            // Don't retry on auth errors or if we're out of retries
+            if (attempt >= maxRetries) break;
+
+            // Exponential backoff: 1s, 2s, 4s...
+            await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
+        }
+    }
+
+    throw lastError;
+}
 
 // --- 1. ROBUST CACHING (VERSION-BASED INVALIDATION) ---
 // Cache persists indefinitely until user changes their rules (triggers cacheVersion increment)
@@ -99,55 +193,151 @@ async function cleanupCache() {
 // Run cleanup on extension startup
 cleanupCache();
 
+// Periodic cache cleanup (every 5 minutes) - prevents unbounded growth
+setInterval(() => {
+    cleanupCache();
+    debugLog('[CLEANUP] Periodic cache cleanup completed');
+}, 5 * 60 * 1000);
+
+// Periodic cleanup of recentlyProcessed and pendingRequests maps (every minute)
+setInterval(() => {
+    const now = Date.now();
+    let recentCleared = 0;
+    let pendingCleared = 0;
+
+    // Clean up recentlyProcessed entries older than 30 seconds
+    for (const [key, timestamp] of recentlyProcessed) {
+        if (now - timestamp > PROCESSING_COOLDOWN_MS * 10) {
+            recentlyProcessed.delete(key);
+            recentCleared++;
+        }
+    }
+
+    // Clean up stale pendingRequests (should be resolved within 15 seconds)
+    // Note: We can't easily track age, but we can limit the size
+    if (pendingRequests.size > 50) {
+        // If too many pending, something is wrong - clear old ones
+        debugLog('[CLEANUP] pendingRequests size exceeded 50, clearing all');
+        pendingRequests.clear();
+        pendingCleared = pendingRequests.size;
+    }
+
+    if (recentCleared > 0 || pendingCleared > 0) {
+        debugLog(`[CLEANUP] Cleared ${recentCleared} recentlyProcessed, ${pendingCleared} pendingRequests`);
+    }
+}, 60 * 1000);
+
+// === STARTUP DIAGNOSTICS ===
+// Log block log status to help debug persistence issues (dev mode only)
+chrome.storage.local.get(['localBlockLog', 'authToken'], (result) => {
+    debugLog('[BEACON STARTUP] Block log entries:', result.localBlockLog?.length || 0);
+    debugLog('[BEACON STARTUP] Auth token present:', !!result.authToken);
+    if (result.localBlockLog && result.localBlockLog.length > 0) {
+        debugLog('[BEACON STARTUP] Most recent block:', result.localBlockLog[0]?.domain);
+    }
+});
+
 // --- LOCAL BLOCK LOG (Privacy-First) ---
 // Stores recent blocks locally - NEVER sent to server
-const MAX_BLOCK_LOG_SIZE = 5000; // ~2.5MB - makes full use of available storage
+// Auto-delete is user-configurable (off by default)
+const MAX_BLOCK_LOG_SIZE = 1000; // ~500KB - reasonable memory footprint
 const BLOCK_LOG_KEY = 'localBlockLog';
+const DEFAULT_LOG_RETENTION_DAYS = 7;
+
+// Get the user's configured retention period (or Infinity if disabled)
+async function getLogRetentionMs() {
+    const { autoDeleteActivityLog, activityLogRetention } = await chrome.storage.local.get([
+        'autoDeleteActivityLog',
+        'activityLogRetention'
+    ]);
+
+    // If auto-delete is disabled (or not set), return Infinity (never delete)
+    if (autoDeleteActivityLog !== true) {
+        return Infinity;
+    }
+
+    // Use stored retention or default to 7 days
+    const days = activityLogRetention ?? DEFAULT_LOG_RETENTION_DAYS;
+    return days * 24 * 60 * 60 * 1000;
+}
 
 async function addToLocalBlockLog(blockData) {
-    console.log('[BLOCK LOG] Adding entry:', blockData.url, blockData.reason);
+    // Check if we should log ALLOW decisions (off by default)
+    const decision = blockData.decision || 'BLOCK';
+    if (decision === 'ALLOW') {
+        const { logAllowDecisions } = await chrome.storage.local.get('logAllowDecisions');
+        debugLog('[ACTIVITY LOG] ALLOW decision - logAllowDecisions setting:', logAllowDecisions);
+        if (!logAllowDecisions) {
+            debugLog('[ACTIVITY LOG] Skipping ALLOW log (setting is off)');
+            return; // Skip logging ALLOW if setting is off
+        }
+    }
+
+    debugLog('[ACTIVITY LOG] Adding entry:', decision, blockData.url, blockData.reason);
     try {
         const result = await chrome.storage.local.get(BLOCK_LOG_KEY);
         let blockLog = result[BLOCK_LOG_KEY] || [];
 
-        // Deduplication: Don't add if it's the exact same URL and reason as the last entry
+        // Deduplication: Don't add if it's the exact same URL, reason, and decision as the last entry
         // This prevents spam from SPA mutations or rapid cache hits
         if (blockLog.length > 0) {
             const last = blockLog[0];
             const isSameUrl = last.url === blockData.url;
             const isSameReason = last.reason === blockData.reason;
-            // Also allow a small time gap (e.g. 5 seconds) if the user manually reloads, 
+            const isSameDecision = (last.decision || 'BLOCK') === decision;
+            // Also allow a small time gap (e.g. 5 seconds) if the user manually reloads,
             // but for automatic triggers, let's just block identical back-to-back entries.
-            if (isSameUrl && isSameReason && (Date.now() - last.timestamp < 10000)) {
+            if (isSameUrl && isSameReason && isSameDecision && (Date.now() - last.timestamp < 10000)) {
                 return;
             }
         }
 
-        // Add new block at the beginning
+        // Add new entry at the beginning
         blockLog.unshift({
             url: blockData.url,
             domain: blockData.domain,
             reason: blockData.reason,
+            decision: decision, // NEW: 'BLOCK' or 'ALLOW'
             pageTitle: blockData.pageTitle || '',
             activePrompt: blockData.activePrompt || null,
             timestamp: Date.now()
         });
 
-        // Keep only last 50
+        // Keep only last 1000
         if (blockLog.length > MAX_BLOCK_LOG_SIZE) {
             blockLog = blockLog.slice(0, MAX_BLOCK_LOG_SIZE);
         }
 
         await chrome.storage.local.set({ [BLOCK_LOG_KEY]: blockLog });
     } catch (e) {
-        console.error('Error adding to block log:', e);
+        console.error('Error adding to activity log:', e);
     }
 }
 
 async function getLocalBlockLog() {
     try {
         const result = await chrome.storage.local.get(BLOCK_LOG_KEY);
-        return result[BLOCK_LOG_KEY] || [];
+        const logs = result[BLOCK_LOG_KEY] || [];
+
+        // Get user's retention setting
+        const retentionMs = await getLogRetentionMs();
+
+        // If retention is Infinity (auto-delete disabled), return all logs
+        if (retentionMs === Infinity) {
+            return logs;
+        }
+
+        // Filter out expired entries based on user's retention setting
+        const now = Date.now();
+        const validLogs = logs.filter(log => (now - log.timestamp) < retentionMs);
+
+        // If we filtered any, update storage
+        if (validLogs.length < logs.length) {
+            await chrome.storage.local.set({ [BLOCK_LOG_KEY]: validLogs });
+            debugLog(`[BLOCK LOG] Cleaned ${logs.length - validLogs.length} expired entries`);
+        }
+
+        return validLogs;
     } catch (e) {
         console.error('Error getting block log:', e);
         return [];
@@ -177,6 +367,30 @@ async function deleteSingleLog(timestamp) {
 }
 
 
+// --- SHARED MESSAGE HANDLER FOR BLOCK LOG OPERATIONS ---
+// Used by both onMessage and onMessageExternal to avoid code duplication
+async function handleBlockLogMessage(message, sendResponse) {
+    switch (message.type) {
+        case 'GET_BLOCK_LOG':
+            const logs = await getLocalBlockLog();
+            sendResponse({ success: true, logs });
+            return true;
+
+        case 'CLEAR_BLOCK_LOG':
+            await clearLocalBlockLog();
+            sendResponse({ success: true });
+            return true;
+
+        case 'DELETE_SINGLE_LOG':
+            await deleteSingleLog(message.timestamp);
+            sendResponse({ success: true });
+            return true;
+
+        default:
+            return false;
+    }
+}
+
 // --- DASHBOARD NOTIFICATION HELPER ---
 // Sends a custom event to all open Dashboard tabs via the content script bridge
 async function notifyDashboard(eventType, detail = {}) {
@@ -202,10 +416,20 @@ async function notifyDashboard(eventType, detail = {}) {
 
 // --- 2. AUTHENTICATION (JWT) ---
 let authToken = null;
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 async function loadAuthToken() {
     try {
-        const items = await chrome.storage.local.get('authToken');
+        const items = await chrome.storage.local.get(['authToken', 'authTokenExpiry']);
+
+        // Check if token has expired
+        if (items.authTokenExpiry && Date.now() > items.authTokenExpiry) {
+            debugLog('[AUTH] Token expired, clearing');
+            await chrome.storage.local.remove(['authToken', 'authTokenExpiry', 'userEmail']);
+            authToken = null;
+            return;
+        }
+
         authToken = items.authToken;
         if (!authToken) {
             // Do NOT auto-open login. It's annoying.
@@ -233,7 +457,7 @@ initialize();
 // --- 3. CORE MESSAGE LISTENER ---
 // Listen for messages from content scripts or popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    console.log('[BEACON BG] Received message:', message.type, 'authToken:', authToken ? 'present' : 'null');
+    debugLog('[BEACON BG] Received message:', message.type);
     if (message.type === 'LOG') {
         return false;
     }
@@ -244,14 +468,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'SYNC_AUTH') {
         chrome.storage.local.set({
             authToken: message.token,
-            userEmail: message.email
+            userEmail: message.email,
+            authTokenExpiry: Date.now() + TOKEN_TTL_MS  // Token expires in 24 hours
         }, () => {
             loadAuthToken();
         });
         return false;
     }
     if (message.type === 'LOGOUT') {
-        chrome.storage.local.remove(['authToken', 'userEmail'], () => {
+        chrome.storage.local.remove(['authToken', 'userEmail', 'authTokenExpiry'], () => {
             loadAuthToken();
         });
         return false;
@@ -260,6 +485,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         chrome.storage.local.set({ theme: message.theme });
         // Notify all other dashboard tabs and the extension popup
         notifyDashboard('BEACON_THEME_UPDATED', { theme: message.theme });
+        return false;
+    }
+    if (message.type === 'SYNC_PAUSE') {
+        debugLog('[BEACON] Sync pause received, paused:', message.paused, 'type:', typeof message.paused);
+        chrome.storage.local.set({ blockingPaused: message.paused }, () => {
+            // Verify storage was set correctly
+            chrome.storage.local.get('blockingPaused', (result) => {
+                debugLog('[BEACON] Storage verification - blockingPaused now:', result.blockingPaused);
+            });
+        });
+
+        // Track engagement event for weekly reports
+        sendEngagementEvent(message.paused ? 'pause' : 'unpause');
+
+        if (message.paused) {
+            // Clear cache when pausing so user gets fresh results on resume
+            handleClearLocalCache(() => {
+                debugLog('[BEACON] Cache cleared due to pause');
+            });
+        }
+        // Notify popup and other tabs
+        notifyDashboard('BEACON_PAUSE_UPDATED', { paused: message.paused });
+        return false;
+    }
+    if (message.type === 'SYNC_ACTIVITY_LOG_SETTINGS') {
+        chrome.storage.local.set({
+            autoDeleteActivityLog: message.autoDelete,
+            activityLogRetention: message.retentionDays,
+            logAllowDecisions: message.logAllowDecisions
+        }, () => {
+            debugLog('[SETTINGS] Activity log settings updated:', message.autoDelete, message.retentionDays, 'logAllows:', message.logAllowDecisions);
+            // Trigger immediate cleanup with new settings
+            getLocalBlockLog();
+        });
         return false;
     }
 
@@ -281,24 +540,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
     }
 
-    // --- BLOCK LOG HANDLERS (for Dashboard) ---
-    if (message.type === 'GET_BLOCK_LOG') {
-        getLocalBlockLog().then(logs => {
-            sendResponse({ success: true, logs: logs });
+    // --- BLOCK LOG HANDLERS (shared with onMessageExternal) ---
+    if (['GET_BLOCK_LOG', 'CLEAR_BLOCK_LOG', 'DELETE_SINGLE_LOG'].includes(message.type)) {
+        handleBlockLogMessage(message, sendResponse);
+        return true;
+    }
+
+    // --- PAUSE STATE HANDLER (Dashboard reads current pause state) ---
+    if (message.type === 'GET_PAUSE_STATE') {
+        chrome.storage.local.get('blockingPaused', (result) => {
+            sendResponse({ paused: result.blockingPaused ?? false });
         });
         return true; // Will respond asynchronously
     }
-    if (message.type === 'CLEAR_BLOCK_LOG') {
-        clearLocalBlockLog().then(() => {
-            sendResponse({ success: true });
+
+    // --- STORAGE USAGE HANDLER (for Dashboard Settings) ---
+    if (message.type === 'GET_STORAGE_USAGE') {
+        debugLog('[BEACON BG] Storage usage requested');
+        chrome.storage.local.getBytesInUse(null, (bytesInUse) => {
+            const maxBytes = 10485760; // 10 MB Chrome limit
+            debugLog('[BEACON BG] Storage usage:', bytesInUse, '/', maxBytes);
+            sendResponse({
+                success: true,
+                used: bytesInUse,
+                max: maxBytes
+            });
         });
-        return true;
-    }
-    if (message.type === 'DELETE_SINGLE_LOG') {
-        deleteSingleLog(message.timestamp).then(() => {
-            sendResponse({ success: true });
-        });
-        return true;
+        return true; // Will respond asynchronously
     }
 
     return false;
@@ -307,160 +575,227 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // --- EXTERNAL MESSAGE LISTENER (for Dashboard) ---
 // Allows dashboard web page to request block logs from extension
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+    // --- SECURITY: Validate sender origin ---
+    // Prevents malicious websites from controlling the extension
+    const TRUSTED_ORIGINS = [
+        'https://beaconblocker.vercel.app',
+        'https://chrome-test-dashboard.vercel.app',
+        ...(typeof IS_DEV !== 'undefined' && IS_DEV ? ['http://localhost:5173', 'http://localhost:3001'] : [])
+    ];
 
-    if (message.type === 'GET_BLOCK_LOG') {
-        getLocalBlockLog().then(logs => {
-            sendResponse({ success: true, logs: logs });
-        });
+    let senderOrigin = null;
+    try {
+        senderOrigin = sender.url ? new URL(sender.url).origin : null;
+    } catch (e) {
+        // Invalid URL
+    }
+
+    if (!senderOrigin || !TRUSTED_ORIGINS.includes(senderOrigin)) {
+        console.warn('[SECURITY] Blocked external message from:', sender.url);
+        sendResponse({ success: false, error: 'Unauthorized origin' });
+        return false;
+    }
+
+    // --- BLOCK LOG HANDLERS (shared with onMessage) ---
+    if (['GET_BLOCK_LOG', 'CLEAR_BLOCK_LOG', 'DELETE_SINGLE_LOG'].includes(message.type)) {
+        handleBlockLogMessage(message, sendResponse);
         return true;
     }
-    if (message.type === 'CLEAR_BLOCK_LOG') {
-        clearLocalBlockLog().then(() => {
-            sendResponse({ success: true });
-        });
-        return true;
-    }
-    if (message.type === 'DELETE_SINGLE_LOG') {
-        deleteSingleLog(message.timestamp).then(() => {
-            sendResponse({ success: true });
-        });
-        return true;
-    }
+
     if (message.type === 'PING') {
         sendResponse({ success: true, version: '1.0' });
         return false;
     }
 
+    // --- PAUSE STATE HANDLER (Dashboard reads current pause state) ---
+    if (message.type === 'GET_PAUSE_STATE') {
+        chrome.storage.local.get('blockingPaused', (result) => {
+            sendResponse({ paused: result.blockingPaused ?? false });
+        });
+        return true;
+    }
+
+    // --- PAUSE SYNC FROM DASHBOARD (Direct External Message) ---
+    if (message.type === 'SYNC_PAUSE') {
+        debugLog('[BEACON EXT] External SYNC_PAUSE received, paused:', message.paused);
+        chrome.storage.local.set({ blockingPaused: message.paused }, () => {
+            debugLog('[BEACON EXT] blockingPaused stored:', message.paused);
+            if (message.paused) {
+                // Clear cache when pausing
+                handleClearLocalCache(() => {
+                    debugLog('[BEACON EXT] Cache cleared due to pause');
+                });
+            }
+            sendResponse({ success: true, paused: message.paused });
+        });
+        return true; // Async response
+    }
+
     return false;
 });
 async function handlePageStateUpdate(message, sender) {
-    const tabId = sender.tab.id;
-    if (!tabId) { console.log('[PSU] No tabId'); return; }
-    const { url, title } = message.data;
-    console.log('[PSU] Processing:', url, title);
+    const tabId = sender.tab?.id;
+    if (!tabId) { debugLog('[PSU] No tabId'); return; }
 
-    // --- 0. Immediate Safe List Check (Prevent Logging/AI) ---
+    // --- TAB LOCKING (Prevents race conditions) ---
+    // Wait for any existing operation on this tab to complete
+    if (tabLocks.has(tabId)) {
+        try {
+            await tabLocks.get(tabId);
+        } catch (e) {
+            // Previous operation failed, continue
+        }
+    }
+
+    // Create lock for this operation
+    const lockPromise = (async () => {
+        const { url, title } = message.data;
+        debugLog('[PSU] Processing:', url);
+
+        // --- PAUSE CHECK ---
+        // Skip all blocking if user has paused Beacon Blocker
+        const { blockingPaused } = await chrome.storage.local.get('blockingPaused');
+        if (blockingPaused) {
+            debugLog('[PSU] Blocking paused, skipping');
+            return;
+        }
+
+        // --- 0. Immediate Safe List Check (Prevent Logging/AI) ---
+        try {
+            const urlObj = new URL(url);
+            const hostname = urlObj.hostname.toLowerCase();
+
+            // Check Safe List (localhost, banks, google, etc.)
+            const isSafe = SAFE_LIST.some(safe => hostname === safe || hostname.endsWith('.' + safe));
+
+            if (isSafe) {
+                debugLog('[PSU] SAFE_LIST skip:', hostname);
+                return;
+            }
+
+            // Check for internal browser URLs
+            if (url.startsWith('chrome://') || url.startsWith('about:') || url.startsWith('edge://')) {
+                debugLog('[PSU] Browser URL skip');
+                return;
+            }
+
+            // --- YouTube Optimization ---
+            // Ignore navigation pages (Home, Search, Feed, History, Channel pages)
+            // Only allow: /watch (Videos) or /shorts/ (Shorts)
+            if (hostname.includes('youtube.com')) {
+                const isContent = urlObj.pathname === '/watch' || urlObj.pathname.startsWith('/shorts/');
+                if (!isContent) {
+                    debugLog('[PSU] YouTube non-content skip');
+                    return;
+                }
+            }
+        } catch (e) {
+            debugLog('[PSU] URL parse error:', e.message);
+            return;
+        }
+
+        // Initialize tab state inside lock to prevent race
+        if (!tabState[tabId]) {
+            tabState[tabId] = { lastProcessedUrl: null, lastProcessedTitle: null };
+        }
+        const state = tabState[tabId];
+
+        // Skip if same URL+title (inside lock to prevent race)
+        if (!title || title === "YouTube") { debugLog('[PSU] Empty/YT title skip'); return; }
+        if (url === state.lastProcessedUrl && title === state.lastProcessedTitle) {
+            debugLog('[PSU] Same URL+title skip');
+            return;
+        }
+
+        if (url !== state.lastProcessedUrl && title === state.lastProcessedTitle) {
+            debugLog('[PSU] URL changed but title same - skip');
+            return;
+        }
+
+        // Update state immediately inside lock
+        state.lastProcessedUrl = url;
+        state.lastProcessedTitle = title;
+
+        // --- COOLDOWN CHECK (Prevent rapid duplicate API calls) ---
+        const cacheKey = normalizeUrl(url);
+        const lastProcessedTime = recentlyProcessed.get(cacheKey);
+        if (lastProcessedTime && (Date.now() - lastProcessedTime < PROCESSING_COOLDOWN_MS)) {
+            debugLog('[PSU] Cooldown skip');
+            return;
+        }
+        recentlyProcessed.set(cacheKey, Date.now());
+        debugLog('[PSU] Proceeding to check...');
+
+        // Cleanup old entries periodically (prevent memory leak)
+        if (recentlyProcessed.size > 100) {
+            const now = Date.now();
+            for (const [key, time] of recentlyProcessed) {
+                if (now - time > PROCESSING_COOLDOWN_MS * 10) {
+                    recentlyProcessed.delete(key);
+                }
+            }
+        }
+
+        // Extract scraped data (now includes bodySnippet for nuanced AI decisions)
+        const { description, keywords, bodySnippet } = message.data;
+
+        const pageData = {
+            url,
+            title,
+            h1: title,
+            description,
+            keywords,
+            bodySnippet: bodySnippet || "",  // 500 words of page content for AI context
+            localTime: new Date().toLocaleString('en-US', { weekday: 'long', hour: 'numeric', minute: 'numeric', hour12: true })
+        };
+
+        const cached = await getCache(url);
+        const { cacheVersion: currentVersion } = await chrome.storage.local.get('cacheVersion');
+
+        // Cache is valid if it exists AND matches current cacheVersion (invalidated when user changes rules)
+        const cacheValid = cached && (!currentVersion || cached.cacheVersion === currentVersion);
+
+        if (cacheValid) {
+            debugLog('[PSU] Cache HIT:', cached.decision);
+            if (cached.decision === 'BLOCK') {
+                // --- PER-TAB SUPPRESSION ---
+                // If this tab is already officially blocked for this URL, don't log it again
+                if (tabState[tabId] && tabState[tabId].blockedUrl === url) {
+                    debugLog('[PSU] Tab already blocked for this URL, skipping log/redirect');
+                    return;
+                }
+
+                const hostname = new URL(url).hostname.replace('www.', '');
+                const cachedBlockReason = cached.reason ? `Cached decision · ${cached.reason}` : 'Cached decision';
+                addToLocalBlockLog({
+                    decision: 'BLOCK',
+                    url: url,
+                    domain: hostname,
+                    reason: cachedBlockReason,
+                    pageTitle: pageData.title || cached.title || '',
+                    activePrompt: cached.activePrompt || null
+                });
+                blockPage(tabId, url);
+            }
+        } else {
+            debugLog('[PSU] Cache MISS, calling handlePageCheck');
+            handlePageCheck(pageData, tabId);
+        }
+        // Shorts tracking is now handled in chrome.tabs.onUpdated listener
+    })();
+
+    // Register the lock and wait for completion
+    tabLocks.set(tabId, lockPromise);
     try {
-        const urlObj = new URL(url);
-        const hostname = urlObj.hostname.toLowerCase();
-
-        // Check Safe List (localhost, banks, google, etc.)
-        // We check if the hostname ends with any safe domain (e.g., 'mail.google.com' ends with 'google.com')
-        // Or if it IS a safe domain (e.g. 'localhost')
-        const isSafe = SAFE_LIST.some(safe => hostname === safe || hostname.endsWith('.' + safe));
-
-        if (isSafe) {
-            console.log('[PSU] SAFE_LIST skip:', hostname);
-            return;
-        }
-
-        // Check for internal browser URLs
-        if (url.startsWith('chrome://') || url.startsWith('about:') || url.startsWith('edge://')) {
-            console.log('[PSU] Browser URL skip');
-            return;
-        }
-
-        // --- YouTube Optimization ---
-        // Ignore navigation pages (Home, Search, Feed, History, Channel pages)
-        // Only allow: /watch (Videos) or /shorts/ (Shorts)
-        if (hostname.includes('youtube.com')) {
-            const isContent = urlObj.pathname === '/watch' || urlObj.pathname.startsWith('/shorts/');
-            if (!isContent) {
-                console.log('[PSU] YouTube non-content skip');
-                return;
-            }
-        }
-    } catch (e) {
-        console.log('[PSU] URL parse error:', e.message);
-        return;
+        await lockPromise;
+    } finally {
+        tabLocks.delete(tabId);
     }
-
-    if (!tabState[tabId]) {
-        tabState[tabId] = { lastProcessedUrl: null, lastProcessedTitle: null, hasBeenChecked: false };
-    }
-    const state = tabState[tabId];
-    if (state.hasBeenChecked) { console.log('[PSU] Already checked this tab'); return; }
-    if (!title || title === "YouTube") { console.log('[PSU] Empty/YT title skip'); return; }
-    if (url === state.lastProcessedUrl && title === state.lastProcessedTitle) { console.log('[PSU] Same URL+title skip'); return; }
-
-    if (url !== state.lastProcessedUrl && title === state.lastProcessedTitle) {
-        console.log('[PSU] URL changed but title same - skip');
-        return;
-    }
-    state.hasBeenChecked = true;
-    state.lastProcessedUrl = url;
-    state.lastProcessedTitle = title;
-
-    // --- COOLDOWN CHECK (Prevent rapid duplicate API calls) ---
-    const cacheKey = normalizeUrl(url);
-    const lastProcessedTime = recentlyProcessed.get(cacheKey);
-    if (lastProcessedTime && (Date.now() - lastProcessedTime < PROCESSING_COOLDOWN_MS)) {
-        console.log('[PSU] Cooldown skip');
-        return;
-    }
-    recentlyProcessed.set(cacheKey, Date.now());
-    console.log('[PSU] Proceeding to check...');
-
-    // Cleanup old entries periodically (prevent memory leak)
-    if (recentlyProcessed.size > 100) {
-        const now = Date.now();
-        for (const [key, time] of recentlyProcessed) {
-            if (now - time > PROCESSING_COOLDOWN_MS * 10) {
-                recentlyProcessed.delete(key);
-            }
-        }
-    }
-
-    // Extract scraped data
-    const { description, keywords, bodyText } = message.data;
-
-    const pageData = {
-        url,
-        title,
-        h1: title,
-        description,
-        keywords,
-        bodyText,
-        localTime: new Date().toLocaleString('en-US', { weekday: 'long', hour: 'numeric', minute: 'numeric', hour12: true })
-    };
-
-    const cached = await getCache(url);
-    const { cacheVersion: currentVersion } = await chrome.storage.local.get('cacheVersion');
-
-    // Cache is valid if it exists AND matches current cacheVersion (invalidated when user changes rules)
-    const cacheValid = cached && (!currentVersion || cached.cacheVersion === currentVersion);
-
-    if (cacheValid) {
-        console.log('[PSU] Cache HIT:', cached.decision);
-        if (cached.decision === 'BLOCK') {
-            // --- PER-TAB SUPPRESSION ---
-            // If this tab is already officially blocked for this URL, don't log it again
-            if (tabState[tabId] && tabState[tabId].blockedUrl === url) {
-                console.log('[PSU] Tab already blocked for this URL, skipping log/redirect');
-                return;
-            }
-
-            const hostname = new URL(url).hostname.replace('www.', '');
-            addToLocalBlockLog({
-                url: url,
-                domain: hostname,
-                reason: cached.reason || 'Blocked by Beacon',
-                pageTitle: pageData.title || cached.title || ''
-            });
-            blockPage(tabId, url);
-        }
-    } else {
-        console.log('[PSU] Cache MISS, calling handlePageCheck');
-        if (cached && !cacheValid) {
-        }
-        handlePageCheck(pageData, tabId);
-    }
-    // Shorts tracking is now handled in chrome.tabs.onUpdated listener
 }
 
 async function handleClearLocalCache(sendResponse) {
     try {
-        const RESERVED_KEYS = ['authToken', 'userEmail', 'theme', BLOCK_LOG_KEY, 'cacheVersion'];
+        const RESERVED_KEYS = ['authToken', 'userEmail', 'theme', BLOCK_LOG_KEY, 'cacheVersion', 'blockingPaused'];
 
         // 1. Capture critical data (Paranoid Snapshot)
         const diskState = await chrome.storage.local.get(RESERVED_KEYS);
@@ -538,8 +873,12 @@ function formatDuration(totalSeconds) {
     const seconds = totalSeconds % 60;
     return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
 }
-async function handleShortsViewed(tabId, url) {
 
+// --- IN-MEMORY SHORTS SESSION BUFFER ---
+// Reduces chrome.storage writes by buffering in memory and persisting periodically
+const shortsSessionBuffer = new Map(); // Map<sessionKey, session>
+
+async function handleShortsViewed(tabId, url) {
     // Normalize URL by stripping query parameters (Instagram adds different params for same reel)
     let normalizedUrl;
     try {
@@ -549,31 +888,85 @@ async function handleShortsViewed(tabId, url) {
         normalizedUrl = url;
     }
 
-
     const sessionKey = `shortsSession_${tabId}`;
-    const { [sessionKey]: session } = await chrome.storage.local.get(sessionKey);
+
+    // Check in-memory buffer first
+    let session = shortsSessionBuffer.get(sessionKey);
+
+    // If not in buffer, try loading from storage
+    if (!session) {
+        const stored = await chrome.storage.local.get(sessionKey);
+        if (stored[sessionKey]?.active) {
+            session = {
+                ...stored[sessionKey],
+                visitedUrls: new Set(stored[sessionKey].visitedUrls || [])
+            };
+            shortsSessionBuffer.set(sessionKey, session);
+        }
+    }
+
     if (session?.active) {
         // Track unique normalized URLs only
-        const visitedUrls = new Set(session.visitedUrls || []);
-        if (visitedUrls.has(normalizedUrl)) {
-
+        if (session.visitedUrls.has(normalizedUrl)) {
             return;
         }
-        visitedUrls.add(normalizedUrl);
-        const newCount = visitedUrls.size;
-
-        await chrome.storage.local.set({ [sessionKey]: { ...session, count: newCount, visitedUrls: Array.from(visitedUrls) } });
+        session.visitedUrls.add(normalizedUrl);
+        session.count = session.visitedUrls.size;
+        // No storage write here - batched in interval below
     } else {
-        const newSession = { active: true, count: 1, startTime: Date.now(), startUrl: url, visitedUrls: [normalizedUrl], platform: getShortsPlatform(url) };
-
-        await chrome.storage.local.set({ [sessionKey]: newSession });
+        // Create new session in buffer
+        const newSession = {
+            active: true,
+            count: 1,
+            startTime: Date.now(),
+            startUrl: url,
+            visitedUrls: new Set([normalizedUrl]),
+            platform: getShortsPlatform(url)
+        };
+        shortsSessionBuffer.set(sessionKey, newSession);
+        // Immediately persist new session start
+        await chrome.storage.local.set({
+            [sessionKey]: {
+                ...newSession,
+                visitedUrls: Array.from(newSession.visitedUrls)
+            }
+        });
     }
 }
+
+// Persist buffered shorts sessions every 5 seconds
+setInterval(async () => {
+    for (const [sessionKey, session] of shortsSessionBuffer) {
+        if (session.active) {
+            await chrome.storage.local.set({
+                [sessionKey]: {
+                    ...session,
+                    visitedUrls: Array.from(session.visitedUrls)
+                }
+            });
+        }
+    }
+}, 5000);
 async function endShortsSession(tabId) {
     const sessionKey = `shortsSession_${tabId}`;
-    const { [sessionKey]: session } = await chrome.storage.local.get(sessionKey);
+
+    // Check buffer first, then storage
+    let session = shortsSessionBuffer.get(sessionKey);
+    if (!session) {
+        const stored = await chrome.storage.local.get(sessionKey);
+        session = stored[sessionKey];
+    }
+
     if (session?.active) {
+        // Clear from both buffer and storage
+        shortsSessionBuffer.delete(sessionKey);
         await chrome.storage.local.remove(sessionKey);
+
+        // Convert Set to size if needed (buffer uses Set, storage uses Array)
+        const count = session.visitedUrls instanceof Set
+            ? session.visitedUrls.size
+            : (session.visitedUrls?.length || session.count || 1);
+
         const durationSeconds = Math.round((Date.now() - session.startTime) / 1000);
         const hostname = session.startUrl ? new URL(session.startUrl).hostname.replace('www.', '') : 'unknown';
         const duration = formatDuration(durationSeconds);
@@ -584,17 +977,18 @@ async function endShortsSession(tabId) {
         if (session.platform === 'TikTok') {
             pageTitle = `TikTok Session (${duration})`;
         } else if (session.platform === 'Reels') {
-            pageTitle = `Reels Session | ${session.count} reel${session.count === 1 ? '' : 's'} watched (${duration})`;
+            pageTitle = `Reels Session | ${count} reel${count === 1 ? '' : 's'} watched (${duration})`;
         } else if (session.platform === 'Shorts') {
-            pageTitle = `Shorts Session | ${session.count} short${session.count === 1 ? '' : 's'} watched (${duration})`;
+            pageTitle = `Shorts Session | ${count} short${count === 1 ? '' : 's'} watched (${duration})`;
         } else {
-            pageTitle = `${session.platform} Session | ${session.count} video${session.count === 1 ? '' : 's'} watched (${duration})`;
+            pageTitle = `${session.platform} Session | ${count} video${count === 1 ? '' : 's'} watched (${duration})`;
         }
 
         const reason = 'Short-form Content';
 
         // Log to local storage so it appears in Activity Log
         addToLocalBlockLog({
+            decision: 'BLOCK',
             url: session.startUrl,
             domain: hostname,
             reason: reason,
@@ -627,14 +1021,28 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
                 // Log cache block to local log (privacy-first)
                 const hostname = new URL(tab.url).hostname.replace('www.', '');
+                const cachedReason = cached.reason ? `Cached decision · ${cached.reason}` : 'Cached decision';
                 addToLocalBlockLog({
+                    decision: 'BLOCK',
                     url: tab.url,
                     domain: hostname,
-                    reason: cached.reason || 'Blocked by Beacon',
-                    pageTitle: logTitle
+                    reason: cachedReason,
+                    pageTitle: logTitle,
+                    activePrompt: cached.activePrompt || null
                 });
                 blockPage(tabId, tab.url);
             } else if (cached.decision === 'ALLOW') {
+                // Optionally log cached ALLOW (if setting is enabled, addToLocalBlockLog will handle)
+                const hostname = new URL(tab.url).hostname.replace('www.', '');
+                const cachedAllowReason = cached.reason ? `Cached decision · ${cached.reason}` : 'Cached decision';
+                addToLocalBlockLog({
+                    decision: 'ALLOW',
+                    url: tab.url,
+                    domain: hostname,
+                    reason: cachedAllowReason,
+                    pageTitle: logTitle,
+                    activePrompt: cached.activePrompt || null
+                });
             }
         }
         tabState[tabId] = { lastProcessedUrl: null, lastProcessedTitle: null, hasBeenChecked: false };
@@ -644,7 +1052,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     }
     // Start tracking when navigating TO a shorts URL
     if (changeInfo.url && isShortsUrl(changeInfo.url)) {
-        console.log('[SHORTS] Tab navigated to shorts URL:', changeInfo.url);
+        debugLog('[SHORTS] Tab navigated to shorts URL:', changeInfo.url);
         handleShortsViewed(tabId, changeInfo.url);
     }
 });
@@ -657,7 +1065,15 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
 
 // --- 6. PAGE CHECK & BACKEND ---
 async function blockPage(tabId, url) {
-    console.log('[BLOCK] Blocking tab', tabId, 'URL:', url);
+    // Check if blocking is paused - skip if so
+    const { blockingPaused } = await chrome.storage.local.get('blockingPaused');
+    debugLog('[BLOCK] blockingPaused check:', blockingPaused, 'url:', url);
+    if (blockingPaused) {
+        debugLog('[BLOCK] Blocking paused, not blocking:', url);
+        return;
+    }
+
+    debugLog('[BLOCK] Blocking tab', tabId, 'URL:', url);
 
     // Mark this tab as blocked for this URL to prevent redundant logging
     if (tabState[tabId]) {
@@ -677,8 +1093,8 @@ async function blockPage(tabId, url) {
     }
 }
 async function handlePageCheck(pageData, tabId) {
-    console.log('[HPC] handlePageCheck called for:', pageData.url);
-    if (!tabId) { console.log('[HPC] No tabId, returning'); return; }
+    debugLog('[HPC] handlePageCheck called');
+    if (!tabId) { debugLog('[HPC] No tabId, returning'); return; }
     const targetUrl = pageData.url;
     if (targetUrl.startsWith(blockedPageUrl)) return;
 
@@ -707,13 +1123,16 @@ async function handlePageCheck(pageData, tabId) {
     const requestPromise = (async () => {
         try {
             const fetchUrl = `${backendUrlBase}/check-url`;
-            console.log('[API] Calling:', fetchUrl, 'with authToken:', authToken ? 'present' : 'null');
-            const response = await fetch(fetchUrl, {
+            const bodyStr = JSON.stringify(pageData);
+            debugLog('[API] Calling:', fetchUrl);
+            debugLog('[API DEBUG] Request body:', bodyStr);
+            debugLog('[API DEBUG] Auth token present:', !!authToken, 'Token length:', authToken?.length);
+            const response = await fetchWithRetry(fetchUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
-                body: JSON.stringify(pageData)
+                body: bodyStr
             });
-            console.log('[API] Response status:', response.status);
+            debugLog('[API] Response status:', response.status);
 
             if (response.status === 401 || response.status === 403) {
                 await chrome.storage.local.remove('authToken');
@@ -722,9 +1141,22 @@ async function handlePageCheck(pageData, tabId) {
                 return null;
             }
 
+            if (response.status === 402) {
+                // Subscription expired — open dashboard once so user sees the SubscriptionGuard
+                // Throttle: only open once per 10 minutes to avoid spamming tabs
+                const { lastSubscriptionPrompt } = await chrome.storage.local.get('lastSubscriptionPrompt');
+                const now = Date.now();
+                if (!lastSubscriptionPrompt || now - lastSubscriptionPrompt > 10 * 60 * 1000) {
+                    debugLog('[API] Subscription required (402) - opening dashboard');
+                    await chrome.storage.local.set({ lastSubscriptionPrompt: now });
+                    chrome.tabs.create({ url: BEACON_CONFIG.DASHBOARD_URL });
+                }
+                return null;
+            }
+
             if (!response.ok) throw new Error(`Server error: ${response.status}`);
             const data = await response.json();
-            console.log('[API] Decision:', data.decision, 'Reason:', data.reason);
+            debugLog('[API] Decision:', data.decision);
 
             // --- Cache Invalidation Check ---
             if (data.cacheVersion) {
@@ -757,9 +1189,9 @@ async function handlePageCheck(pageData, tabId) {
             );
 
             if (!isTimeSensitive) {
-                await setCache(targetUrl, { decision: data.decision, title: pageData.title, reason: data.reason });
+                await setCache(targetUrl, { decision: data.decision, title: pageData.title, reason: data.reason, activePrompt: data.activePrompt || null });
             } else {
-                console.log('[CACHE] Skipping cache for time-sensitive decision:', data.reason);
+                debugLog('[CACHE] Skipping cache for time-sensitive decision');
             }
             return data;
         } catch (error) {
@@ -777,6 +1209,7 @@ async function handlePageCheck(pageData, tabId) {
             // Log block locally (privacy-first - never sent to server)
             const hostname = new URL(targetUrl).hostname.replace('www.', '');
             addToLocalBlockLog({
+                decision: 'BLOCK',
                 url: targetUrl,
                 domain: hostname,
                 reason: data.reason || 'Blocked by Beacon',
@@ -785,6 +1218,18 @@ async function handlePageCheck(pageData, tabId) {
             });
 
             blockPage(tabId, targetUrl);
+        } else if (data?.decision === 'ALLOW') {
+            // Log allow locally if user has enabled this setting
+            debugLog('[API] ALLOW decision - calling addToLocalBlockLog');
+            const hostname = new URL(targetUrl).hostname.replace('www.', '');
+            addToLocalBlockLog({
+                decision: 'ALLOW',
+                url: targetUrl,
+                domain: hostname,
+                reason: data.reason || 'Allowed',
+                pageTitle: pageData.title || '',
+                activePrompt: data.activePrompt || null
+            });
         }
     } finally {
         // Clean up after request completes
