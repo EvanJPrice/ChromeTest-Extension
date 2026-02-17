@@ -189,6 +189,7 @@ const SAFE_LIST = [
     'github.com', 'stackoverflow.com', // Dev
     'localhost', '127.0.0.1', '0.0.0.0', 'ai-dashboard',
     'vercel.app', 'netlify.app', // Dashboards
+    'beaconblocker.com', // Custom domain (dashboard.beaconblocker.com, api.beaconblocker.com)
     chrome.runtime.id // Extension pages (blocked.html)
 ];
 
@@ -890,6 +891,12 @@ async function handleClearLocalCache(sendResponse) {
         if (Object.keys(recoveryPayload).length > 0) {
             await chrome.storage.local.set(recoveryPayload);
         }
+
+        // 5. Reset in-memory dedup state so reloading a page after cache clear re-checks it
+        for (const tabId of Object.keys(tabState)) {
+            tabState[tabId] = { lastProcessedUrl: null, lastProcessedTitle: null, hasBeenChecked: false };
+        }
+        recentlyProcessed.clear();
 
         // Notify dashboard to refresh if open
         await notifyDashboard('BEACON_BLOCK_LOG_UPDATED');
