@@ -1077,6 +1077,16 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     }
 
     if (changeInfo.status === 'loading' && tab.url) {
+        // Skip SAFE_LIST URLs entirely (dashboard, banks, etc.)
+        try {
+            const loadHostname = new URL(tab.url).hostname.toLowerCase();
+            const isSafeUrl = SAFE_LIST.some(safe => loadHostname === safe || loadHostname.endsWith('.' + safe));
+            if (isSafeUrl) {
+                tabState[tabId] = { lastProcessedUrl: null, lastProcessedTitle: null, hasBeenChecked: false };
+                return;
+            }
+        } catch (e) { /* invalid URL, continue */ }
+
         const cached = await getCache(tab.url);
         const { cacheVersion: currentVersion } = await chrome.storage.local.get('cacheVersion');
 
@@ -1170,10 +1180,9 @@ async function handlePageCheck(pageData, tabId) {
     const targetUrl = pageData.url;
     if (targetUrl.startsWith(blockedPageUrl)) return;
 
-    // 0. Local Safe List Check
+    // 0. Local Safe List Check — skip silently (no cache, no log)
     const hostname = new URL(targetUrl).hostname;
-    if (SAFE_LIST.some(safe => hostname.endsWith(safe))) {
-        await setCache(targetUrl, { decision: 'ALLOW' });
+    if (SAFE_LIST.some(safe => hostname === safe || hostname.endsWith('.' + safe))) {
         return;
     }
 
