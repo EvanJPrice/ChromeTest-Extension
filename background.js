@@ -28,6 +28,71 @@ const pendingRequests = new Map(); // Map<normalizedUrl, Promise>
 const recentlyProcessed = new Map(); // Map<normalizedUrl, timestamp>
 const PROCESSING_COOLDOWN_MS = 3000; // 3 second cooldown between checks of same URL
 
+// --- PAGE DATA ENCRYPTION ---
+// Encrypts page data before sending to backend (AES-256-GCM, same scheme as prompt encryption)
+const CRYPTO_SALT = 'BeaconBlockerPresetSalt_v1';
+const CRYPTO_ITERATIONS = 100000;
+const CRYPTO_KEY_LENGTH = 256; // bits
+const CRYPTO_IV_LENGTH = 12; // bytes
+
+// Extract userId from Supabase JWT (sub claim)
+function getUserIdFromToken(token) {
+    try {
+        const payload = token.split('.')[1];
+        const decoded = JSON.parse(atob(payload));
+        return decoded.sub || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Derive AES-256 key from userId using PBKDF2 (matches server-side cryptoUtils.js)
+async function deriveEncryptionKey(userId) {
+    const encoder = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+        'raw',
+        encoder.encode(userId),
+        { name: 'PBKDF2' },
+        false,
+        ['deriveKey']
+    );
+    return crypto.subtle.deriveKey(
+        {
+            name: 'PBKDF2',
+            salt: encoder.encode(CRYPTO_SALT),
+            iterations: CRYPTO_ITERATIONS,
+            hash: 'SHA-256'
+        },
+        keyMaterial,
+        { name: 'AES-GCM', length: CRYPTO_KEY_LENGTH },
+        false,
+        ['encrypt']
+    );
+}
+
+// Encrypt a string using AES-256-GCM, returns "ENC:" + base64
+async function encryptString(plaintext, userId) {
+    if (!plaintext || !userId) return plaintext;
+    try {
+        const key = await deriveEncryptionKey(userId);
+        const encoder = new TextEncoder();
+        const iv = crypto.getRandomValues(new Uint8Array(CRYPTO_IV_LENGTH));
+        const encrypted = await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv },
+            key,
+            encoder.encode(plaintext)
+        );
+        // Combine IV + ciphertext (auth tag is appended by WebCrypto)
+        const combined = new Uint8Array(iv.length + encrypted.byteLength);
+        combined.set(iv);
+        combined.set(new Uint8Array(encrypted), iv.length);
+        return 'ENC:' + btoa(String.fromCharCode(...combined));
+    } catch (e) {
+        debugLog('[ENCRYPT] Failed:', e.message);
+        return plaintext; // Fallback to unencrypted
+    }
+}
+
 // --- ENGAGEMENT EVENT TRACKING ---
 // Send engagement events to backend for weekly reports (pause, unpause, strict mode, etc.)
 async function sendEngagementEvent(eventType, metadata = {}) {
@@ -1123,9 +1188,28 @@ async function handlePageCheck(pageData, tabId) {
     const requestPromise = (async () => {
         try {
             const fetchUrl = `${backendUrlBase}/check-url`;
-            const bodyStr = JSON.stringify(pageData);
+
+            // Encrypt page data before sending to backend
+            const userId = getUserIdFromToken(authToken);
+            let bodyStr;
+            if (userId) {
+                const sensitiveData = JSON.stringify({
+                    url: pageData.url,
+                    title: pageData.title,
+                    h1: pageData.h1,
+                    description: pageData.description,
+                    keywords: pageData.keywords,
+                    bodySnippet: pageData.bodySnippet
+                });
+                const encryptedData = await encryptString(sensitiveData, userId);
+                bodyStr = JSON.stringify({ encryptedData, localTime: pageData.localTime });
+                debugLog('[API] Page data encrypted before sending');
+            } else {
+                bodyStr = JSON.stringify(pageData);
+                debugLog('[API] No userId available, sending unencrypted');
+            }
+
             debugLog('[API] Calling:', fetchUrl);
-            debugLog('[API DEBUG] Request body:', bodyStr);
             debugLog('[API DEBUG] Auth token present:', !!authToken, 'Token length:', authToken?.length);
             const response = await fetchWithRetry(fetchUrl, {
                 method: 'POST',
