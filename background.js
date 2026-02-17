@@ -339,6 +339,16 @@ async function addToLocalBlockLog(blockData) {
         }
     }
 
+    // Check if we should log cached decisions (off by default)
+    const isCached = blockData.reason && blockData.reason.toLowerCase().includes('cached decision');
+    if (isCached) {
+        const { logCachedDecisions } = await chrome.storage.local.get('logCachedDecisions');
+        if (!logCachedDecisions) {
+            debugLog('[ACTIVITY LOG] Skipping cached decision log (setting is off)');
+            return;
+        }
+    }
+
     debugLog('[ACTIVITY LOG] Adding entry:', decision, blockData.url, blockData.reason);
     try {
         const result = await chrome.storage.local.get(BLOCK_LOG_KEY);
@@ -579,9 +589,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         chrome.storage.local.set({
             autoDeleteActivityLog: message.autoDelete,
             activityLogRetention: message.retentionDays,
-            logAllowDecisions: message.logAllowDecisions
+            logAllowDecisions: message.logAllowDecisions,
+            logCachedDecisions: message.logCachedDecisions
         }, () => {
-            debugLog('[SETTINGS] Activity log settings updated:', message.autoDelete, message.retentionDays, 'logAllows:', message.logAllowDecisions);
+            debugLog('[SETTINGS] Activity log settings updated:', message.autoDelete, message.retentionDays, 'logAllows:', message.logAllowDecisions, 'logCached:', message.logCachedDecisions);
             // Trigger immediate cleanup with new settings
             getLocalBlockLog();
         });
