@@ -655,6 +655,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     // --- SECURITY: Validate sender origin ---
     // Prevents malicious websites from controlling the extension
     const TRUSTED_ORIGINS = [
+        'https://dashboard.beaconblocker.com',
         'https://beaconblocker.vercel.app',
         'https://chrome-test-dashboard.vercel.app',
         ...(typeof IS_DEV !== 'undefined' && IS_DEV ? ['http://localhost:5173', 'http://localhost:3001'] : [])

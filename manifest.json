@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Beacon Blocker",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "AI-powered content blocker that helps you stay focused by blocking distracting websites based on your personal goals.",
   "icons": {
     "16": "logo-16.png",
